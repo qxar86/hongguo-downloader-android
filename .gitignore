@@ -1,0 +1,14 @@
+# Buildozer / Android build outputs (regenerable, can be several GB)
+.buildozer/
+bin/
+
+# Local build logs (build1.log etc. may embed local environment dumps)
+*.log
+
+# Python caches
+__pycache__/
+*.pyc
+
+# App-private runtime files created on device / in tests
+*.mp4
+downloads/

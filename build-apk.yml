@@ -1,0 +1,87 @@
+# Build the HongGuo downloader APK with Buildozer on GitHub Actions.
+#
+# Why this exists: the local VM cannot write files right now (every
+# external program's file write fails with EPERM), so local buildozer
+# builds die at the first file-writing step. A GitHub-hosted runner
+# is a clean Linux machine without that restriction.
+#
+# Trigger: manually, from the repo's Actions tab ("Run workflow").
+# Output: the debug APK is uploaded as a workflow artifact
+# (Actions run page -> Artifacts -> hongguodownloader-apk).
+# First clean build compiles python + SDL2 + ffmpeg + libx264 from
+# source, so it takes a while (estimate: 1-2 hours on a hosted runner);
+# later runs reuse the cached .buildozer directory.
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Hosted runners have limited disk; buildozer + Android SDK/NDK
+      # + ffmpeg sources need room. Drop preinstalled toolchains we
+      # never use (standard free-disk step for Android CI).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h .
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake \
+            libffi-dev libssl-dev libltdl-dev automake yasm
+
+      - name: Install Buildozer
+        run: |
+          pip install --upgrade pip
+          pip install buildozer
+
+      - name: Cache Buildozer directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      # The repo spec sets android.skip_update = True because the local
+      # VM has a manually pre-installed SDK behind an authenticated
+      # proxy. A fresh runner has no SDK at all, so buildozer must be
+      # allowed to run sdkmanager. Flip only for this CI run; the
+      # committed spec stays untouched for local builds.
+      - name: Allow sdkmanager updates on CI
+        run: |
+          sed -i 's/^android.skip_update = True/android.skip_update = False/' buildozer.spec
+          grep -E '^(android.skip_update|android.accept_sdk_license)' buildozer.spec
+
+      - name: Build APK
+        run: buildozer android debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hongguodownloader-apk
+          path: bin/*.apk
+          if-no-files-found: error
