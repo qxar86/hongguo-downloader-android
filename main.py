@@ -436,7 +436,14 @@ class DownloaderUI(BoxLayout):
 
     @mainthread
     def _append_log(self, text):
-        self._log_text = (self._log_text + text + "\n")[-30000:]
+        # 日志只留最近 40 行、2500 字: Label 整段文字会渲成一张纹理,
+        # 集数一多纹理高度超过显卡上限 (常见 4096px) 整段日志会直接变
+        # 空白 —— 每集开始/完成两行、路径又长, 约 25 集正好撞上这个上限。
+        # 把纹理高度压在安全线内, 旧行自动顶掉, 最新进展一直在。
+        lines = (self._log_text + text + "\n").split("\n")
+        if len(lines) > 40:
+            lines = lines[-40:]
+        self._log_text = "\n".join(lines)[-2500:]
         self.log_label.text = self._log_text
 
     def ui_log(self, *a):
