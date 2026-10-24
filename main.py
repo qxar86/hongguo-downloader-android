@@ -45,6 +45,7 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.checkbox import CheckBox
 from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
@@ -224,9 +225,10 @@ class DownloaderUI(BoxLayout):
         brow.add_widget(self.auth_btn)
         self.add_widget(brow)
 
-        # 文件夹浏览器面板 (平时收起, 高度为 0; 点「浏览目录」才展开)
-        self.browser_panel = BoxLayout(orientation="vertical", size_hint_y=None,
-                                       height=0, spacing=dp(6))
+        # 文件夹浏览器改成弹窗: 内嵌面板在部分机器上会跟外层滚动布局
+        # 互相干扰, 浏览目录行会被压到上级行下面重叠, 列表区也会塌到 0 高。
+        # 弹窗独立于主界面布局, 不参与主表单的高度计算, 从根上杜绝重叠。
+        _pop_content = BoxLayout(orientation="vertical", spacing=dp(8))
         # 路径栏固定单行、超长打省略号: 之前自适应换行会让长路径
         # 撑高、反过来挤占列表区的空间。完整路径仍在下方「下载目录」里。
         self.browser_path_label = F(Label, text="", size_hint_y=None, height=dp(24),
@@ -235,7 +237,7 @@ class DownloaderUI(BoxLayout):
         self.browser_path_label.bind(
             width=lambda *_: setattr(self.browser_path_label, "text_size",
                                      (self.browser_path_label.width, None)))
-        self.browser_panel.add_widget(self.browser_path_label)
+        _pop_content.add_widget(self.browser_path_label)
         nrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.newdir_input = F(TextInput, hint_text="新文件夹名",
                               multiline=False)
@@ -243,14 +245,13 @@ class DownloaderUI(BoxLayout):
         self.mkdir_btn = F(Button, text="新建", size_hint_x=None, width=dp(72))
         self.mkdir_btn.bind(on_release=self.on_mkdir)
         nrow.add_widget(self.mkdir_btn)
-        self.browser_panel.add_widget(nrow)
-        # 列表区高度写死, 不再交给布局弹性分配: 弹性分配在这台机器上
-        # 会把列表压到约 0 高, 导致子文件夹一个都看不到。
-        self.browser_scroll = ScrollView(size_hint=(1, None), height=dp(180))
+        _pop_content.add_widget(nrow)
+        # 弹窗尺寸固定, 列表区用弹性高度即可, 不会再被压没。
+        self.browser_scroll = ScrollView(size_hint=(1, 1))
         self.browser_list = BoxLayout(orientation="vertical", size_hint_y=None)
         self.browser_list.bind(minimum_height=self.browser_list.setter("height"))
         self.browser_scroll.add_widget(self.browser_list)
-        self.browser_panel.add_widget(self.browser_scroll)
+        _pop_content.add_widget(self.browser_scroll)
         brow2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.up_btn = F(Button, text="上级")
         self.up_btn.bind(on_release=self.on_browse_up)
@@ -261,8 +262,9 @@ class DownloaderUI(BoxLayout):
         self.close_btn = F(Button, text="关闭")
         self.close_btn.bind(on_release=self.on_browse_close)
         brow2.add_widget(self.close_btn)
-        self.browser_panel.add_widget(brow2)
-        self.add_widget(self.browser_panel)
+        _pop_content.add_widget(brow2)
+        self.browser_popup = Popup(title="选择下载目录", content=_pop_content,
+                                   size_hint=(0.92, 0.72), auto_dismiss=False)
         self.browse_dir = ""
 
         mrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(40), spacing=dp(8))
@@ -364,8 +366,8 @@ class DownloaderUI(BoxLayout):
             self.browse_dir = "/storage/emulated/0"
         else:
             self.browse_dir = download_base()
-        self.browser_panel.height = dp(320)
         self._refresh_browser()
+        self.browser_popup.open()
 
     def _refresh_browser(self):
         self.browser_path_label.text = f"浏览: {self.browse_dir}"
@@ -403,11 +405,11 @@ class DownloaderUI(BoxLayout):
         self.dest_input.text = self.browse_dir
         save_dest(self.browse_dir)
         self._set_dir_label(self.browse_dir)
-        self.browser_panel.height = 0
+        self.browser_popup.dismiss()
         self.ui_log(f"已选择保存目录: {self.browse_dir}")
 
     def on_browse_close(self, *_):
-        self.browser_panel.height = 0
+        self.browser_popup.dismiss()
 
     def on_mkdir(self, *_):
         name = hd.sanitize((self.newdir_input.text or "").strip())
