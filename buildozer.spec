@@ -54,6 +54,7 @@ android.accept_sdk_license = True
 # build-tools 34.0.0, platform android-33) are pre-installed manually,
 # because this VM's authenticated egress proxy breaks sdkmanager's HTTP.
 android.skip_update = True
+p4a.local_recipes = ./p4a-recipes
 
 # (int) Target Android API, minimum Android API
 # android.api = 33
