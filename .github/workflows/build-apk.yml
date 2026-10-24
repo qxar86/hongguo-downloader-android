@@ -7,7 +7,9 @@
 #
 # Trigger: manually, from the repo's Actions tab ("Run workflow").
 # Output: the debug APK is uploaded as a workflow artifact
-# (Actions run page -> Artifacts -> hongguodownloader-apk).
+# (Actions run page -> Artifacts -> hongguodownloader-apk) and also
+# published to the repo's Releases page (tag v<spec version>, e.g. v1.2;
+# a later build with the same spec version updates that release).
 # First clean build compiles python + SDL2 + ffmpeg + libx264 from
 # source, so it takes a while (estimate: 1-2 hours on a hosted runner);
 # later runs reuse the cached .buildozer directory.
@@ -20,8 +22,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    # Creating/updating a release needs write access to repo contents.
     permissions:
-    contents: write
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,16 +90,22 @@ jobs:
           name: hongguodownloader-apk
           path: bin/*.apk
           if-no-files-found: error
+
+      # Publish the same APK to Releases so it is visible and kept
+      # permanently (artifacts expire after 90 days). Tag is taken from
+      # buildozer.spec's version line, so bumping the spec version
+      # creates a new release; rebuilding the same version updates
+      # the existing release's asset instead of failing on a duplicate.
       - name: Publish Release
-      env:
-      GH_TOKEN: ${{ github.token }}
-  run: |
-    VERSION=$(grep '^version = ' buildozer.spec | awk '{print $3}')
-      TAG="v$VERSION"
-    if gh release view "$TAG" >/dev/null 2>&1; then
-    gh release upload "$TAG" bin/*.apk --clobber
-    else
-      gh release create "$TAG" bin/*.apk \
-        --title "hongguodownloader $TAG" \
-        --notes "Automated Buildozer build from commit ${{ github.sha }} (run #${{ github.run_number }})."
-        fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep '^version = ' buildozer.spec | awk '{print $3}')
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" bin/*.apk --clobber
+          else
+            gh release create "$TAG" bin/*.apk \
+              --title "hongguodownloader $TAG" \
+              --notes "Automated Buildozer build from commit ${{ github.sha }} (run #${{ github.run_number }})."
+          fi
