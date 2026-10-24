@@ -227,7 +227,14 @@ class DownloaderUI(BoxLayout):
         # 文件夹浏览器面板 (平时收起, 高度为 0; 点「浏览目录」才展开)
         self.browser_panel = BoxLayout(orientation="vertical", size_hint_y=None,
                                        height=0, spacing=dp(6))
-        self.browser_path_label = _wrap_label("", font_size=sp(12))
+        # 路径栏固定单行、超长打省略号: 之前自适应换行会让长路径
+        # 撑高、反过来挤占列表区的空间。完整路径仍在下方「下载目录」里。
+        self.browser_path_label = F(Label, text="", size_hint_y=None, height=dp(24),
+                                    font_size=sp(12), shorten=True, halign="left",
+                                    valign="middle")
+        self.browser_path_label.bind(
+            width=lambda *_: setattr(self.browser_path_label, "text_size",
+                                     (self.browser_path_label.width, None)))
         self.browser_panel.add_widget(self.browser_path_label)
         nrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.newdir_input = F(TextInput, hint_text="新文件夹名",
@@ -237,7 +244,9 @@ class DownloaderUI(BoxLayout):
         self.mkdir_btn.bind(on_release=self.on_mkdir)
         nrow.add_widget(self.mkdir_btn)
         self.browser_panel.add_widget(nrow)
-        self.browser_scroll = ScrollView(size_hint=(1, 1))
+        # 列表区高度写死, 不再交给布局弹性分配: 弹性分配在这台机器上
+        # 会把列表压到约 0 高, 导致子文件夹一个都看不到。
+        self.browser_scroll = ScrollView(size_hint=(1, None), height=dp(180))
         self.browser_list = BoxLayout(orientation="vertical", size_hint_y=None)
         self.browser_list.bind(minimum_height=self.browser_list.setter("height"))
         self.browser_scroll.add_widget(self.browser_list)
@@ -366,10 +375,15 @@ class DownloaderUI(BoxLayout):
         except Exception as e:  # noqa: BLE001
             self.ui_log(f"打不开目录 {self.browse_dir}: {e}")
             names = []
-        for name in names:
+        dirs = [n for n in names
+                if os.path.isdir(os.path.join(self.browse_dir, n))]
+        if not dirs:
+            # 空目录也要明说, 否则空白一片、和列表被压没分不出来。
+            self.browser_list.add_widget(F(Label, text="(该目录下没有子文件夹)",
+                                           size_hint_y=None, height=dp(44),
+                                           font_size=sp(12)))
+        for name in dirs:
             full = os.path.join(self.browse_dir, name)
-            if not os.path.isdir(full):
-                continue
             btn = F(Button, text=name, size_hint_y=None, height=dp(44))
             btn.bind(on_release=lambda _b, p=full: self._browse_into(p))
             self.browser_list.add_widget(btn)
