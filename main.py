@@ -287,17 +287,19 @@ class DownloaderUI(BoxLayout):
         self.add_widget(self.dir_label)
 
         scroll = ScrollView(size_hint=(1, None), height=dp(200))
-        self.log_label = F(Label, text="", valign="top", halign="left",
-                           size_hint_y=None)
-        self.log_label.bind(texture_size=self._on_log_texture)
-        self.log_label.bind(width=self._on_log_width)
-        scroll.add_widget(self.log_label)
+        # 日志改成每行一个独立 Label: 整段文字渲成一张纹理时, 集数一多
+        # 纹理超限会整段变空白 (截断到 40 行/2500 字实测仍未解决, 说明
+        # 单张纹理这条路本身不可靠)。每行独立渲染后, 每张纹理只有一
+        # 行高, 再长的下载也不会超限; 旧行从列表里摘掉, 内存也不涨。
+        self.log_list = BoxLayout(orientation="vertical", size_hint_y=None)
+        self.log_list.bind(minimum_height=self.log_list.setter("height"))
+        scroll.add_widget(self.log_list)
+        self.log_lines = []
         # 日志区不放进可滚动表单, 由 build() 固定在屏幕底部: 否则表单
         # 高于屏幕时日志区被挤到屏幕外, 下载时看不到日志在滚; 而且嵌套
         # 在外层 ScrollView 里时, 手指滑日志区会被外层抢走、划不动。
         self._scroll = scroll
         self.log_scroll = scroll
-        self._log_text = ""
 
         # 接管核心模块的日志输出
         hd.log = self.ui_log
@@ -427,24 +429,17 @@ class DownloaderUI(BoxLayout):
             self.ui_log(f"新建文件夹失败: {e}")
 
     # ------------------------------------------------------------------ 日志
-    def _on_log_width(self, *_):
-        self.log_label.text_size = (self.log_label.width, None)
-
-    def _on_log_texture(self, *_):
-        self.log_label.height = max(self.log_label.texture_size[1], 1)
-        self._scroll.scroll_y = 0
+    _LOG_MAX_LINES = 120
 
     @mainthread
     def _append_log(self, text):
-        # 日志只留最近 40 行、2500 字: Label 整段文字会渲成一张纹理,
-        # 集数一多纹理高度超过显卡上限 (常见 4096px) 整段日志会直接变
-        # 空白 —— 每集开始/完成两行、路径又长, 约 25 集正好撞上这个上限。
-        # 把纹理高度压在安全线内, 旧行自动顶掉, 最新进展一直在。
-        lines = (self._log_text + text + "\n").split("\n")
-        if len(lines) > 40:
-            lines = lines[-40:]
-        self._log_text = "\n".join(lines)[-2500:]
-        self.log_label.text = self._log_text
+        for line in str(text).split("\n"):
+            lab = _wrap_label(line if line else " ", font_size=sp(12))
+            self.log_list.add_widget(lab)
+            self.log_lines.append(lab)
+        while len(self.log_lines) > self._LOG_MAX_LINES:
+            self.log_list.remove_widget(self.log_lines.pop(0))
+        self._scroll.scroll_y = 0
 
     def ui_log(self, *a):
         self._append_log(" ".join(str(x) for x in a))

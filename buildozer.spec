@@ -18,7 +18,7 @@ source.include_exts = py
 # (str) Application versioning (method 1)
 # 1.2: 新增用户手动选择下载目录 (1.1 的 build1 因网络下载失败, 从未出包,
 # 所以 1.2 才是第一版真正要装的包)
-version = 1.2
+version = 1.3
 
 # (list) Application requirements
 # ffmpeg + av_codecs 是 v2 的关键: p4a 的 ffmpeg 配方把 ffmpeg 可执行文件
@@ -29,7 +29,22 @@ version = 1.2
 # 否则基础配置缺 concat demuxer, 合并会失败; 代价是包体变大、构建变慢。
 # pycryptodome: 若配方构建失败, 删掉它即可 (核心模块有纯 Python AES 兜底,
 # 只在 ffmpeg 解密失败时用)。
+# charset-normalizer 固定 3.3.2: 3.5.2 在 p4a 里打出 cp314/android 平台
+# wheel, pip --target 装到安卓目标时报 not a supported wheel, 致 CI #1
+# (2026-10-24) 在 pip 装模块那步失败; 3.3.2 是纯 Python 包
+# (py3-none-any), requests 要求 charset-normalizer<4,>=2, 兼容。
+# CI #2/#3 证明光 pin 版本、加配方都不够: p4a build.py 的跳过检查是
+# mname.lower().replace("-","_") 对 Requirement().name, 而后者保留连字符,
+# 故 charset-normalizer 的 3.5.2 wheel URL 总被当成额外纯依赖塞回安装列表。
+# 所以需求名故意写下划线 charset_normalizer==3.3.2, 使跳过检查命中、
+# 3.5.2 URL 不再进入最终安装; p4a-recipes/ 下的连字符配方目录此后不再被匹配,
+# 留置不用。pip 按 PEP 503 视下划线与连字符为同一包, 不影响安装。
 requirements = python3,kivy,requests,certifi,urllib3,idna,charset_normalizer==3.3.2,pycryptodome,ffmpeg,av_codecs
+
+# (str) p4a 本地配方目录: 配方名即子目录名, 须与 requirements 里的
+# 包名一致 (charset-normalizer)。CI 上同样要把 p4a-recipes/ 推上去,
+# 否则 buildozer 找不到本地配方, 会退回 pip 模块老路。
+p4a.local_recipes = ./p4a-recipes
 
 # (str) Preset of the mobile OS
 orientation = portrait
@@ -54,7 +69,6 @@ android.accept_sdk_license = True
 # build-tools 34.0.0, platform android-33) are pre-installed manually,
 # because this VM's authenticated egress proxy breaks sdkmanager's HTTP.
 android.skip_update = True
-p4a.local_recipes = ./p4a-recipes
 
 # (int) Target Android API, minimum Android API
 # android.api = 33

@@ -1094,10 +1094,10 @@ def merge_videos(paths, out_path):
 
 
 def _download_episodes(eps, vids, outdir, want_q, device_id, install_id, overwrite,
-                       merge=False, title="", max_workers=4):
+                       merge=False, title="", max_workers=5):
     """整剧批量下载 (CLI 与交互模式共用), 返回退出码。
     多集并行: 各集写各自的文件 (中间文件为目标同名的 .enc.mp4, 互不干扰),
-    日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 4 集
+    日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 5 集
     并发, max_workers<=1 时退回单线程顺序下载 (线程池 worker 数为 1)。
     merge=True 时, 全部下完后把成功集数按集序合并为一个整体视频 (单集文件保留)。"""
     os.makedirs(outdir, exist_ok=True)
