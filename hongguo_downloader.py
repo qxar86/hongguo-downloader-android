@@ -76,6 +76,7 @@ import struct
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import requests
@@ -1093,29 +1094,51 @@ def merge_videos(paths, out_path):
 
 
 def _download_episodes(eps, vids, outdir, want_q, device_id, install_id, overwrite,
-                       merge=False, title=""):
+                       merge=False, title="", max_workers=4):
     """整剧批量下载 (CLI 与交互模式共用), 返回退出码。
+    多集并行: 各集写各自的文件 (中间文件为目标同名的 .enc.mp4, 互不干扰),
+    日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 4 集
+    并发, max_workers<=1 时退回单线程顺序下载 (线程池 worker 数为 1)。
     merge=True 时, 全部下完后把成功集数按集序合并为一个整体视频 (单集文件保留)。"""
     os.makedirs(outdir, exist_ok=True)
     ok, fail = 0, []
     failed_eps = set()
+    total = len(vids)
+
+    def _run_one(n):
+        vid = vids[n - 1]
+        path = os.path.join(outdir, f"第{n:02d}集.mp4")
+        q, size, _meta, method = download_episode_to_file(
+            vid, want_q, device_id, install_id, path)
+        return n, vid, path, q, size, method
+
+    jobs = []
     for n in eps:
         vid = vids[n - 1]
         path = os.path.join(outdir, f"第{n:02d}集.mp4")
         if os.path.exists(path) and not overwrite:
-            log(f"[{n}/{len(vids)}] 跳过已存在: {path}")
+            log(f"[{n}/{total}] 跳过已存在: {path}")
             ok += 1
             continue
-        try:
-            log(f"[{n}/{len(vids)}] vid={vid} 请求 {want_q}p 下载中...")
-            q, size, meta, method = download_episode_to_file(
-                vid, want_q, device_id, install_id, path)
-            ok += 1
-            log(f"[{n}/{len(vids)}] 完成 {path} ({size/1e6:.2f} MB, 实际 {q}p, 解密={method})")
-        except Exception as e:  # noqa: BLE001
-            fail.append((n, vid, str(e)))
-            failed_eps.add(n)
-            log(f"[{n}/{len(vids)}] 失败 vid={vid}: {e}")
+        log(f"[{n}/{total}] vid={vid} 请求 {want_q}p 下载中...")
+        jobs.append(n)
+
+    if jobs:
+        workers = 1 if not max_workers or max_workers <= 1 else min(max_workers, len(jobs))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_run_one, n): n for n in jobs}
+            for fut in as_completed(futs):
+                n = futs[fut]
+                try:
+                    n, vid, path, q, size, method = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    vid = vids[n - 1]
+                    fail.append((n, vid, str(e)))
+                    failed_eps.add(n)
+                    log(f"[{n}/{total}] 失败 vid={vid}: {e}")
+                else:
+                    ok += 1
+                    log(f"[{n}/{total}] 完成 {path} ({size/1e6:.2f} MB, 实际 {q}p, 解密={method})")
     log(f"全部结束: 成功 {ok}, 失败 {len(fail)}")
     for n, vid, err in fail:
         log(f"  失败: 第{n}集 vid={vid} {err}")

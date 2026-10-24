@@ -292,8 +292,11 @@ class DownloaderUI(BoxLayout):
         self.log_label.bind(texture_size=self._on_log_texture)
         self.log_label.bind(width=self._on_log_width)
         scroll.add_widget(self.log_label)
-        self.add_widget(scroll)
+        # 日志区不放进可滚动表单, 由 build() 固定在屏幕底部: 否则表单
+        # 高于屏幕时日志区被挤到屏幕外, 下载时看不到日志在滚; 而且嵌套
+        # 在外层 ScrollView 里时, 手指滑日志区会被外层抢走、划不动。
         self._scroll = scroll
+        self.log_scroll = scroll
         self._log_text = ""
 
         # 接管核心模块的日志输出
@@ -600,10 +603,15 @@ class DownloaderUI(BoxLayout):
 
 class HongGuoApp(App):
     def build(self):
-        # 整个表单放进 ScrollView: 内容高于屏幕时可滚动, 不再互相挤压重叠。
-        scroll = ScrollView(size_hint=(1, 1))
-        scroll.add_widget(DownloaderUI())
-        return scroll
+        # 表单放进 ScrollView (内容高于屏幕时可滚动); 日志区固定在屏幕
+        # 底部、一直在视野里, 下载时日志滚动可见, 手指也能直接划日志区。
+        ui = DownloaderUI()
+        root = BoxLayout(orientation="vertical")
+        form_scroll = ScrollView(size_hint=(1, 1))
+        form_scroll.add_widget(ui)
+        root.add_widget(form_scroll)
+        root.add_widget(ui.log_scroll)
+        return root
 
 
 if __name__ == "__main__":
