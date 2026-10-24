@@ -29,7 +29,7 @@ version = 1.2
 # 否则基础配置缺 concat demuxer, 合并会失败; 代价是包体变大、构建变慢。
 # pycryptodome: 若配方构建失败, 删掉它即可 (核心模块有纯 Python AES 兜底,
 # 只在 ffmpeg 解密失败时用)。
-requirements = python3,kivy,requests,certifi,urllib3,idna,charset-normalizer,pycryptodome,ffmpeg,av_codecs
+requirements = python3,kivy,requests,certifi,urllib3,idna,charset-normalizer==3.3.2,pycryptodome,ffmpeg,av_codecs
 
 # (str) Preset of the mobile OS
 orientation = portrait
