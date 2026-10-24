@@ -20,6 +20,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    permissions:
+    contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,3 +87,16 @@ jobs:
           name: hongguodownloader-apk
           path: bin/*.apk
           if-no-files-found: error
+      - name: Publish Release
+      env:
+      GH_TOKEN: ${{ github.token }}
+  run: |
+    VERSION=$(grep '^version = ' buildozer.spec | awk '{print $3}')
+      TAG="v$VERSION"
+    if gh release view "$TAG" >/dev/null 2>&1; then
+    gh release upload "$TAG" bin/*.apk --clobber
+    else
+      gh release create "$TAG" bin/*.apk \
+        --title "hongguodownloader $TAG" \
+        --notes "Automated Buildozer build from commit ${{ github.sha }} (run #${{ github.run_number }})."
+        fi
