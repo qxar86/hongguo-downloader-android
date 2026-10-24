@@ -40,6 +40,7 @@ import threading
 from kivy.app import App
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
+from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.checkbox import CheckBox
@@ -67,6 +68,18 @@ def F(widget_cls, **kw):
     if CJK_FONT and "font_name" not in kw:
         kw["font_name"] = CJK_FONT
     return widget_cls(**kw)
+
+
+def _wrap_label(text="", font_size=None, **kw):
+    """可能很长的文本用的自适应 Label: 宽度变了就重排, 高度跟纹理走。
+    固定高度 + 不换行是旧界面在手机上裁字/溢出的原因之一, 剧名、
+    目录路径这类长文本都走这里, 不再写死高度。"""
+    lab = F(Label, text=text, halign="left", valign="top", size_hint_y=None, **kw)
+    if font_size is not None:
+        lab.font_size = font_size
+    lab.bind(width=lambda *_: setattr(lab, "text_size", (lab.width, None)))
+    lab.bind(texture_size=lambda *_: setattr(lab, "height", max(lab.texture_size[1], 1)))
+    return lab
 
 
 def download_base():
@@ -148,7 +161,11 @@ def request_all_files_access():
 
 class DownloaderUI(BoxLayout):
     def __init__(self, **kw):
-        super().__init__(orientation="vertical", padding=12, spacing=8, **kw)
+        super().__init__(orientation="vertical", padding=dp(12), spacing=dp(8), **kw)
+        # 根布局自身不固定高度, 高度跟内容走; App.build 会把它放进
+        # ScrollView, 小屏手机上整个表单可以滚动, 不再被压到重叠。
+        self.size_hint_y = None
+        self.bind(minimum_height=self.setter("height"))
         self.detail = None          # fetch_detail 结果 (整剧模式)
         self.vids = []              # vid 列表
         self.single_vid = ""        # 单集模式 vid
@@ -157,45 +174,45 @@ class DownloaderUI(BoxLayout):
         self.install_id = hd.random_device_id()
         self.busy = False
 
-        self.add_widget(F(Label, text="红果短剧下载器", font_size=22,
-                          size_hint_y=None, height=36))
+        self.add_widget(F(Label, text="红果短剧下载器", font_size=sp(22),
+                          size_hint_y=None, height=dp(36)))
         self.id_input = F(TextInput, hint_text="剧集 ID / 详情页 URL / 单集 vid",
-                          multiline=False, size_hint_y=None, height=48)
+                          multiline=False, size_hint_y=None, height=dp(48))
         self.add_widget(self.id_input)
 
-        self.info_btn = F(Button, text="获取剧集信息", size_hint_y=None, height=48)
+        self.info_btn = F(Button, text="获取剧集信息", size_hint_y=None, height=dp(48))
         self.info_btn.bind(on_release=self.on_get_info)
         self.add_widget(self.info_btn)
 
-        self.info_label = F(Label, text="", size_hint_y=None, height=30)
+        self.info_label = _wrap_label("")
         self.add_widget(self.info_label)
 
-        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=8)
-        row.add_widget(F(Label, text="集数:", size_hint_x=None, width=52))
+        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
+        row.add_widget(F(Label, text="集数:", size_hint_x=None, width=dp(52)))
         self.eps_input = F(TextInput, text="all", hint_text="all / 1-5 / 1,3,5",
                            multiline=False)
         row.add_widget(self.eps_input)
         self.add_widget(row)
 
         self.probe_btn = F(Button, text="查询可下载分辨率", size_hint_y=None,
-                           height=48, disabled=True)
+                           height=dp(48), disabled=True)
         self.probe_btn.bind(on_release=self.on_probe)
         self.add_widget(self.probe_btn)
 
         self.quality = F(Spinner, text="先查询分辨率", values=(),
-                         size_hint_y=None, height=48, disabled=True)
+                         size_hint_y=None, height=dp(48), disabled=True)
         self.add_widget(self.quality)
 
         # ---- 保存目录: 手动输入 / 浏览选择, 选择结果自动持久化 ----
-        drow = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=8)
-        drow.add_widget(F(Label, text="保存到:", size_hint_x=None, width=64))
+        drow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
+        drow.add_widget(F(Label, text="保存到:", size_hint_x=None, width=dp(64)))
         saved = load_saved_dest()
         self.dest_input = F(TextInput, text=saved or download_base(),
                             multiline=False)
         drow.add_widget(self.dest_input)
         self.add_widget(drow)
 
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8)
+        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.browse_btn = F(Button, text="浏览目录...")
         self.browse_btn.bind(on_release=self.on_browse)
         brow.add_widget(self.browse_btn)
@@ -209,15 +226,14 @@ class DownloaderUI(BoxLayout):
 
         # 文件夹浏览器面板 (平时收起, 高度为 0; 点「浏览目录」才展开)
         self.browser_panel = BoxLayout(orientation="vertical", size_hint_y=None,
-                                       height=0, spacing=6)
-        self.browser_path_label = F(Label, text="", size_hint_y=None, height=26,
-                                    font_size=12)
+                                       height=0, spacing=dp(6))
+        self.browser_path_label = _wrap_label("", font_size=sp(12))
         self.browser_panel.add_widget(self.browser_path_label)
-        nrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8)
+        nrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.newdir_input = F(TextInput, hint_text="新文件夹名",
                               multiline=False)
         nrow.add_widget(self.newdir_input)
-        self.mkdir_btn = F(Button, text="新建", size_hint_x=None, width=72)
+        self.mkdir_btn = F(Button, text="新建", size_hint_x=None, width=dp(72))
         self.mkdir_btn.bind(on_release=self.on_mkdir)
         nrow.add_widget(self.mkdir_btn)
         self.browser_panel.add_widget(nrow)
@@ -226,7 +242,7 @@ class DownloaderUI(BoxLayout):
         self.browser_list.bind(minimum_height=self.browser_list.setter("height"))
         self.browser_scroll.add_widget(self.browser_list)
         self.browser_panel.add_widget(self.browser_scroll)
-        brow2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=44, spacing=8)
+        brow2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
         self.up_btn = F(Button, text="上级")
         self.up_btn.bind(on_release=self.on_browse_up)
         brow2.add_widget(self.up_btn)
@@ -240,27 +256,26 @@ class DownloaderUI(BoxLayout):
         self.add_widget(self.browser_panel)
         self.browse_dir = ""
 
-        mrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=34, spacing=8)
-        self.merge_cb = CheckBox(size_hint_x=None, width=36, active=False)
+        mrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(40), spacing=dp(8))
+        self.merge_cb = CheckBox(size_hint_x=None, width=dp(36), active=False)
         mrow.add_widget(self.merge_cb)
-        mrow.add_widget(F(Label, text="下载完成后按集序合并成一个整体视频 (原生 ffmpeg)",
+        mrow.add_widget(F(Label, text="下载完成后按集序合并成一个整体视频",
                           halign="left"))
         self.add_widget(mrow)
 
-        self.dl_btn = F(Button, text="开始下载", size_hint_y=None, height=52,
+        self.dl_btn = F(Button, text="开始下载", size_hint_y=None, height=dp(52),
                         disabled=True)
         self.dl_btn.bind(on_release=self.on_download)
         self.add_widget(self.dl_btn)
 
-        self.ff_btn = F(Button, text="检测原生 ffmpeg", size_hint_y=None, height=44)
+        self.ff_btn = F(Button, text="检测原生 ffmpeg", size_hint_y=None, height=dp(44))
         self.ff_btn.bind(on_release=self.on_check_ffmpeg)
         self.add_widget(self.ff_btn)
 
-        self.dir_label = F(Label, text="", size_hint_y=None, height=26,
-                           font_size=12)
+        self.dir_label = _wrap_label("", font_size=sp(12))
         self.add_widget(self.dir_label)
 
-        scroll = ScrollView(size_hint=(1, 1))
+        scroll = ScrollView(size_hint=(1, None), height=dp(200))
         self.log_label = F(Label, text="", valign="top", halign="left",
                            size_hint_y=None)
         self.log_label.bind(texture_size=self._on_log_texture)
@@ -340,7 +355,7 @@ class DownloaderUI(BoxLayout):
             self.browse_dir = "/storage/emulated/0"
         else:
             self.browse_dir = download_base()
-        self.browser_panel.height = 280
+        self.browser_panel.height = dp(320)
         self._refresh_browser()
 
     def _refresh_browser(self):
@@ -355,10 +370,10 @@ class DownloaderUI(BoxLayout):
             full = os.path.join(self.browse_dir, name)
             if not os.path.isdir(full):
                 continue
-            btn = F(Button, text=name, size_hint_y=None, height=44)
+            btn = F(Button, text=name, size_hint_y=None, height=dp(44))
             btn.bind(on_release=lambda _b, p=full: self._browse_into(p))
             self.browser_list.add_widget(btn)
-        self.browser_list.height = max(44 * len(self.browser_list.children), 44)
+        self.browser_list.height = max(dp(44) * len(self.browser_list.children), dp(44))
 
     def _browse_into(self, path):
         self.browse_dir = path
@@ -569,7 +584,10 @@ class DownloaderUI(BoxLayout):
 
 class HongGuoApp(App):
     def build(self):
-        return DownloaderUI()
+        # 整个表单放进 ScrollView: 内容高于屏幕时可滚动, 不再互相挤压重叠。
+        scroll = ScrollView(size_hint=(1, 1))
+        scroll.add_widget(DownloaderUI())
+        return scroll
 
 
 if __name__ == "__main__":
