@@ -1,0 +1,78 @@
+# Build the HongGuo downloader Windows .exe with PyInstaller on GitHub Actions.
+#
+# Why this exists: PyInstaller cannot cross-compile, so a Windows .exe
+# cannot be produced on the local Linux VM. A GitHub-hosted Windows
+# runner builds it instead, the same way the APK workflow builds on
+# a Linux runner.
+#
+# Trigger: manually, from the repo's Actions tab ("Run workflow").
+# Output: dist/hongguo_downloader.exe is uploaded as a workflow
+# artifact (Actions run page -> Artifacts -> hongguo-downloader-exe)
+# and also published to the repo's Releases page under a tag
+# exe-v<version>, e.g. exe-v2026-10-25.6 (a later build with the same
+# version updates that release; a new version creates a new release).
+# ffmpeg is NOT bundled: put ffmpeg.exe next to the .exe on Windows.
+#
+# REQUIRED FILES in the repo root before running (not yet pushed):
+#   hongguo_downloader_v2026-10-25.py  (desktop v2026-10-25.6)
+#   hongguo_downloader.spec            (Analysis entry is that .py)
+#   .github/workflows/build-exe.yml    (this file)
+# Do NOT run this against the repo's hongguo_downloader.py alone:
+# that is the older APK-bundled copy (no retries, no /player/ link
+# parsing, no __VERSION__ stamp), so the .exe would be stale.
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    # Creating/updating a release needs write access to repo contents.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pycryptodome pyinstaller
+
+      - name: Build exe
+        run: pyinstaller --clean --noconfirm hongguo_downloader.spec
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: hongguo-downloader-exe
+          path: dist/hongguo_downloader.exe
+          if-no-files-found: error
+
+      # Publish the same exe to Releases so it is visible and kept
+      # permanently (artifacts expire after 90 days). Tag is taken
+      # from __VERSION__ in the .py, so bumping the version creates
+      # a new release; rebuilding the same version updates the
+      # existing release's asset instead of failing on a duplicate.
+      # The exe- prefix keeps these tags apart from the APK v1.3 tags.
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION=$(grep -o '__VERSION__ = "[^"]*"' hongguo_downloader_v2026-10-25.py | cut -d'"' -f2)
+          TAG="exe-v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/hongguo_downloader.exe --clobber
+          else
+            gh release create "$TAG" dist/hongguo_downloader.exe \
+              --title "hongguo downloader exe $TAG" \
+              --notes "Automated PyInstaller build from commit ${{ github.sha }} (run #${{ github.run_number }}). Put ffmpeg.exe next to the exe."
+          fi
