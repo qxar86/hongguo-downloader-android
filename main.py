@@ -101,7 +101,10 @@ def F(widget_cls, **kw):
 def _wrap_label(text="", font_size=None, **kw):
     """可能很长的文本用的自适应 Label: 宽度变了就重排, 高度跟纹理走。
     固定高度 + 不换行是旧界面在手机上裁字/溢出的原因之一, 剧名、
-    目录路径这类长文本都走这里, 不再写死高度。"""
+    目录路径这类长文本都走这里, 不再写死高度。
+    浅色主题下普通 Label 默认是白字、放在白底上会直接隐形, 所以
+    这里默认深灰字; 需要白字的地方再显式传 color 覆盖。"""
+    kw.setdefault("color", (0.13, 0.13, 0.13, 1))
     lab = F(Label, text=text, halign="left", valign="top", size_hint_y=None, **kw)
     if font_size is not None:
         lab.font_size = font_size
@@ -277,7 +280,7 @@ class DownloaderUI(MDBoxLayout):
         # 撑高、反过来挤占列表区的空间。完整路径仍在下方「下载目录」里。
         self.browser_path_label = F(Label, text="", size_hint_y=None, height=dp(24),
                                     font_size=sp(12), shorten=True, halign="left",
-                                    valign="middle")
+                                    valign="middle", color=(0.13, 0.13, 0.13, 1))
         self.browser_path_label.bind(
             width=lambda *_: setattr(self.browser_path_label, "text_size",
                                      (self.browser_path_label.width, None)))
@@ -436,7 +439,8 @@ class DownloaderUI(MDBoxLayout):
             # 空目录也要明说, 否则空白一片、和列表被压没分不出来。
             self.browser_list.add_widget(F(Label, text="(该目录下没有子文件夹)",
                                            size_hint_y=None, height=dp(44),
-                                           font_size=sp(12)))
+                                           font_size=sp(12),
+                                           color=(0.13, 0.13, 0.13, 1)))
         for name in dirs:
             full = os.path.join(self.browse_dir, name)
             btn = F(Button, text=name, size_hint_y=None, height=dp(44))
