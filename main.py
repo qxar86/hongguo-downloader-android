@@ -696,6 +696,10 @@ class DownloaderUI(MDBoxLayout):
                 self.ui_log(f"下载出错: {e}")
                 self._set_busy(False, "下载出错")
 
+        # 之前漏了这一行: work() 只定义、从没启动过, 所以点下载后
+        # 只显示「下载中...」、既不打日志也不下文件。1.4.4 补上。
+        threading.Thread(target=work, daemon=True).start()
+
 
 class HongGuoApp(MDApp):
     def build(self):
