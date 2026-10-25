@@ -9,7 +9,7 @@
 
 界面 (v1.4 起): KivyMD 1.2.0 的 Material Design 组件 —— MDTopAppBar
 顶栏、描边 MDTextField 输入框、MDRaisedButton / MDFlatButton、
-MDDropdownMenu 选分辨率、MDCheckbox 合并开关、MDDialog 文件夹浏览器、
+弹窗列表选分辨率、MDCheckbox 合并开关、MDDialog 文件夹浏览器、
 MDCard 包起来的日志区。下载核心与日志机制 (每行一个独立 Label,
 彻底绕开整段纹理超限变空白) 与之前版本完全一致, 只换了界面层。
 
@@ -43,7 +43,7 @@ import os
 import re
 import threading
 
-from kivy.clock import mainthread
+from kivy.clock import Clock, mainthread
 from kivy.core.text import LabelBase
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
@@ -57,7 +57,6 @@ from kivymd.uix.button import MDRaisedButton, MDFlatButton
 from kivymd.uix.card import MDCard
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.label import MDLabel
-from kivymd.uix.menu import MDDropdownMenu
 from kivymd.uix.selectioncontrol import MDCheckbox
 from kivymd.uix.textfield import MDTextField
 from kivymd.uix.toolbar import MDTopAppBar
@@ -204,9 +203,9 @@ class DownloaderUI(MDBoxLayout):
         self.device_id = hd.random_device_id()
         self.install_id = hd.random_device_id()
         self.busy = False
-        self.quality_values = []    # 分辨率下拉菜单的显示文案
+        self.quality_values = []    # 分辨率弹窗列表的显示文案
         self.quality_index = 0      # 当前选中的分辨率下标
-        self.quality_menu = None    # MDDropdownMenu, 打开时持有
+        self.quality_dialog = None  # 选择分辨率的 MDDialog, 打开时持有
 
         self.id_input = F(MDTextField, hint_text="剧集 ID / 详情页 / 播放页链接",
                           mode="rectangle", size_hint_y=None, height=dp(56))
@@ -236,7 +235,8 @@ class DownloaderUI(MDBoxLayout):
         self.add_widget(self.probe_btn)
 
         # 分辨率原来是 Spinner, KivyMD 里没有 Spinner, 改成描边按钮
-        # 点开 MDDropdownMenu 选档 (文案是纯英文数字, 不用操心字体)。
+        # 点开居中的 MDDialog 列表选档 (下拉菜单 MDDropdownMenu 在真机
+        # 上位置偏右、超出右边界, 点选还会闪退, 直接弃用)。
         self.quality_btn = F(MDRaisedButton, text="先查询分辨率",
                              size_hint=(1, None), height=dp(48), disabled=True)
         self.quality_btn.bind(on_release=self._open_quality_menu)
@@ -336,7 +336,10 @@ class DownloaderUI(MDBoxLayout):
                            font_style="Caption")
         self.add_widget(self.dir_label)
 
-        scroll = ScrollView(size_hint=(1, None), height=dp(200))
+        # ScrollView 不写死高度、改成填满卡片: 卡片本身就是 200dp,
+        # 写死 200dp 再加卡片内边距会让它从卡片底部戳出去 16dp, 日志
+        # 内容跑到卡片边界外面、被屏幕底边裁掉。
+        scroll = ScrollView(size_hint=(1, 1))
         # 日志改成每行一个独立 Label: 整段文字渲成一张纹理时, 集数一多
         # 纹理超限会整段变空白 (截断到 40 行/2500 字实测仍未解决, 说明
         # 单张纹理这条路本身不可靠)。每行独立渲染后, 每张纹理只有一
@@ -492,6 +495,10 @@ class DownloaderUI(MDBoxLayout):
         while len(self.log_lines) > self._LOG_MAX_LINES:
             self.log_list.remove_widget(self.log_lines.pop(0))
         self._scroll.scroll_y = 0
+        # 新行的高度要等下一帧纹理生成后才定下来, 同步置 scroll_y=0
+        # 时内容还没长高、等于没滚, 日志就会停在顶部、最新行被裁在
+        # 卡片外面。下一帧再滚一次, 此时高度已定、才能真正到底部。
+        Clock.schedule_once(lambda dt: setattr(self._scroll, "scroll_y", 0), 0)
 
     def ui_log(self, *a):
         self._append_log(" ".join(str(x) for x in a))
@@ -513,16 +520,31 @@ class DownloaderUI(MDBoxLayout):
         return hd.extract_id((self.id_input.text or "").strip())
 
     def _open_quality_menu(self, *_):
+        # 分辨率选择用居中的 MDDialog 列表 (与文件夹浏览器同一套路):
+        # 弹窗天然居中、不会超出右边界; 行按钮用文件夹列表同款绑定
+        # 写法 (lambda _b, v=v), 点选不再经过下拉菜单的内部逻辑。
         if not self.quality_values:
             return
-        if self.quality_menu:
-            self.quality_menu.dismiss()
-        items = [{"viewclass": "OneLineListItem", "text": v,
-                  "on_release": lambda _item, v=v: self._select_quality(v)}
-                 for v in self.quality_values]
-        self.quality_menu = MDDropdownMenu(caller=self.quality_btn,
-                                           items=items, width_mult=4)
-        self.quality_menu.open()
+        if self.quality_dialog:
+            self.quality_dialog.dismiss()
+        content = MDBoxLayout(orientation="vertical",
+                              size_hint_y=None,
+                              height=dp(48) * len(self.quality_values))
+        for v in self.quality_values:
+            btn = F(MDFlatButton, text=v, size_hint=(1, None), height=dp(48))
+            btn.bind(on_release=lambda _b, v=v: self._select_quality(v))
+            content.add_widget(btn)
+        _cancel = F(MDFlatButton, text="取消")
+        _cancel.bind(on_release=self._close_quality_menu)
+        self.quality_dialog = MDDialog(title="选择分辨率", type="custom",
+                                       content_cls=content,
+                                       buttons=[_cancel])
+        self.quality_dialog.open()
+
+    def _close_quality_menu(self, *_):
+        if self.quality_dialog:
+            self.quality_dialog.dismiss()
+            self.quality_dialog = None
 
     def _select_quality(self, value):
         try:
@@ -530,9 +552,7 @@ class DownloaderUI(MDBoxLayout):
         except ValueError:
             self.quality_index = 0
         self.quality_btn.text = value
-        if self.quality_menu:
-            self.quality_menu.dismiss()
-            self.quality_menu = None
+        self._close_quality_menu()
 
     # ------------------------------------------------------------------ 流程
     def on_get_info(self, *_):
@@ -547,9 +567,7 @@ class DownloaderUI(MDBoxLayout):
         self.quality_values = []
         self.quality_index = 0
         self.quality_btn.text = "先查询分辨率"
-        if self.quality_menu:
-            self.quality_menu.dismiss()
-            self.quality_menu = None
+        self._close_quality_menu()
 
         def work():
             try:
