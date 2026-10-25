@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-红果短剧下载器 - 安卓版 v2 (Kivy 界面 + 原生 ffmpeg)
+红果短剧下载器 - 安卓版 v2 (KivyMD Material 界面 + 原生 ffmpeg)
 
 核心逻辑全部复用桌面版 hongguo_downloader.py (同目录模块):
 详情 -> video_model -> spade 派生密钥 -> CENC 解密, 与桌面版同一套代码。
 界面流程与桌面交互模式一致: 输 id -> 查信息 -> 选集数 -> 探测分辨率 ->
 选档 -> 下载。下载在后台线程进行, 日志实时回显。
+
+界面 (v1.4 起): KivyMD 1.2.0 的 Material Design 组件 —— MDTopAppBar
+顶栏、描边 MDTextField 输入框、MDRaisedButton / MDFlatButton、
+MDDropdownMenu 选分辨率、MDCheckbox 合并开关、MDDialog 文件夹浏览器、
+MDCard 包起来的日志区。下载核心与日志机制 (每行一个独立 Label,
+彻底绕开整段纹理超限变空白) 与之前版本完全一致, 只换了界面层。
 
 原生 ffmpeg 的来源 (不是外挂二进制, 不是 Termux):
 buildozer.spec 的 requirements 里加了 p4a 的 ffmpeg + av_codecs 配方,
@@ -37,18 +43,24 @@ import os
 import re
 import threading
 
-from kivy.app import App
-from kivy.clock import Clock, mainthread
-from kivy.core.window import Window
+from kivy.clock import mainthread
+from kivy.core.text import LabelBase
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
-from kivy.uix.checkbox import CheckBox
 from kivy.uix.label import Label
-from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.spinner import Spinner
-from kivy.uix.textinput import TextInput
+
+from kivymd.app import MDApp
+from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.uix.button import MDRaisedButton, MDFlatButton
+from kivymd.uix.card import MDCard
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.label import MDLabel
+from kivymd.uix.menu import MDDropdownMenu
+from kivymd.uix.selectioncontrol import MDCheckbox
+from kivymd.uix.textfield import MDTextField
+from kivymd.uix.toolbar import MDTopAppBar
 
 import hongguo_downloader as hd
 
@@ -64,9 +76,24 @@ _CJK_CANDIDATES = [
 ]
 CJK_FONT = next((p for p in _CJK_CANDIDATES if os.path.exists(p)), None)
 
+# KivyMD 所有文字默认走 Roboto (无中文): 把 Roboto 各字重重注册为系统
+# CJK 字体, 顶栏标题、弹窗标题、按钮文字里的中文才能正常显示 (图标字体
+# Icons 不动)。要在任何 KivyMD 控件创建之前做, 模块导入时即生效。
+if CJK_FONT:
+    try:
+        for _name in ("Roboto", "RobotoThin", "RobotoLight",
+                      "RobotoMedium", "RobotoBlack"):
+            LabelBase.register(name=_name, fn_regular=CJK_FONT,
+                               fn_bold=CJK_FONT, fn_italic=CJK_FONT,
+                               fn_bolditalic=CJK_FONT)
+    except Exception:
+        pass
+
 
 def F(widget_cls, **kw):
-    if CJK_FONT and "font_name" not in kw:
+    # 只给确实有 font_name 属性的控件设 CJK 字体 (顶栏等没有该属性的
+    # 控件靠上面的 Roboto 重注册, 乱传未知属性会在运行时报错)。
+    if CJK_FONT and "font_name" not in kw and hasattr(widget_cls, "font_name"):
         kw["font_name"] = CJK_FONT
     return widget_cls(**kw)
 
@@ -95,7 +122,7 @@ def download_base():
     except Exception:
         pass
     try:
-        return os.path.join(App.get_running_app().user_data_dir, "downloads")
+        return os.path.join(MDApp.get_running_app().user_data_dir, "downloads")
     except Exception:
         return os.path.join(os.getcwd(), "downloads")
 
@@ -103,7 +130,7 @@ def download_base():
 def _dest_file():
     """保存用户所选目录的小文件 (放应用私有目录, 不依赖存储权限)。"""
     try:
-        base = App.get_running_app().user_data_dir
+        base = MDApp.get_running_app().user_data_dir
     except Exception:
         base = os.getcwd()
     return os.path.join(base, "dest_dir.txt")
@@ -160,13 +187,13 @@ def request_all_files_access():
         return False
 
 
-class DownloaderUI(BoxLayout):
+class DownloaderUI(MDBoxLayout):
     def __init__(self, **kw):
-        super().__init__(orientation="vertical", padding=dp(12), spacing=dp(8), **kw)
+        super().__init__(orientation="vertical", padding=dp(16), spacing=dp(12),
+                         adaptive_height=True, **kw)
         # 根布局自身不固定高度, 高度跟内容走; App.build 会把它放进
         # ScrollView, 小屏手机上整个表单可以滚动, 不再被压到重叠。
         self.size_hint_y = None
-        self.bind(minimum_height=self.setter("height"))
         self.detail = None          # fetch_detail 结果 (整剧模式)
         self.vids = []              # vid 列表
         self.single_vid = ""        # 单集模式 vid
@@ -174,61 +201,78 @@ class DownloaderUI(BoxLayout):
         self.device_id = hd.random_device_id()
         self.install_id = hd.random_device_id()
         self.busy = False
+        self.quality_values = []    # 分辨率下拉菜单的显示文案
+        self.quality_index = 0      # 当前选中的分辨率下标
+        self.quality_menu = None    # MDDropdownMenu, 打开时持有
 
-        self.add_widget(F(Label, text="红果短剧下载器", font_size=sp(22),
-                          size_hint_y=None, height=dp(36)))
-        self.id_input = F(TextInput, hint_text="剧集 ID / 详情页 URL / 单集 vid",
-                          multiline=False, size_hint_y=None, height=dp(48))
+        self.id_input = F(MDTextField, hint_text="剧集 ID / 详情页 / 播放页链接",
+                          mode="rectangle", size_hint_y=None, height=dp(56))
         self.add_widget(self.id_input)
 
-        self.info_btn = F(Button, text="获取剧集信息", size_hint_y=None, height=dp(48))
+        self.info_btn = F(MDRaisedButton, text="获取剧集信息",
+                          size_hint=(1, None), height=dp(48))
         self.info_btn.bind(on_release=self.on_get_info)
         self.add_widget(self.info_btn)
 
-        self.info_label = _wrap_label("")
+        self.info_label = F(MDLabel, text="", adaptive_height=True,
+                            size_hint_y=None, theme_text_color="Secondary")
         self.add_widget(self.info_label)
 
-        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
-        row.add_widget(F(Label, text="集数:", size_hint_x=None, width=dp(52)))
-        self.eps_input = F(TextInput, text="all", hint_text="all / 1-5 / 1,3,5",
-                           multiline=False)
+        row = MDBoxLayout(orientation="horizontal", size_hint_y=None,
+                          height=dp(56), spacing=dp(8))
+        row.add_widget(F(MDLabel, text="集数:", size_hint=(None, None),
+                         size=(dp(52), dp(56)), valign="middle"))
+        self.eps_input = F(MDTextField, text="all", hint_text="all / 1-5 / 1,3,5",
+                           mode="rectangle", size_hint_y=None, height=dp(56))
         row.add_widget(self.eps_input)
         self.add_widget(row)
 
-        self.probe_btn = F(Button, text="查询可下载分辨率", size_hint_y=None,
-                           height=dp(48), disabled=True)
+        self.probe_btn = F(MDFlatButton, text="查询可下载分辨率",
+                           size_hint=(1, None), height=dp(48), disabled=True)
         self.probe_btn.bind(on_release=self.on_probe)
         self.add_widget(self.probe_btn)
 
-        self.quality = F(Spinner, text="先查询分辨率", values=(),
-                         size_hint_y=None, height=dp(48), disabled=True)
-        self.add_widget(self.quality)
+        # 分辨率原来是 Spinner, KivyMD 里没有 Spinner, 改成描边按钮
+        # 点开 MDDropdownMenu 选档 (文案是纯英文数字, 不用操心字体)。
+        self.quality_btn = F(MDRaisedButton, text="先查询分辨率",
+                             size_hint=(1, None), height=dp(48), disabled=True)
+        self.quality_btn.bind(on_release=self._open_quality_menu)
+        self.add_widget(self.quality_btn)
 
         # ---- 保存目录: 手动输入 / 浏览选择, 选择结果自动持久化 ----
-        drow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
-        drow.add_widget(F(Label, text="保存到:", size_hint_x=None, width=dp(64)))
+        drow = MDBoxLayout(orientation="horizontal", size_hint_y=None,
+                           height=dp(56), spacing=dp(8))
+        drow.add_widget(F(MDLabel, text="保存到:", size_hint=(None, None),
+                          size=(dp(64), dp(56)), valign="middle"))
         saved = load_saved_dest()
-        self.dest_input = F(TextInput, text=saved or download_base(),
-                            multiline=False)
+        self.dest_input = F(MDTextField, text=saved or download_base(),
+                            mode="rectangle", size_hint_y=None, height=dp(56))
         drow.add_widget(self.dest_input)
         self.add_widget(drow)
 
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
-        self.browse_btn = F(Button, text="浏览目录...")
+        brow = MDBoxLayout(orientation="horizontal", size_hint_y=None,
+                           height=dp(44), spacing=dp(8))
+        self.browse_btn = F(MDFlatButton, text="浏览目录...",
+                            size_hint=(1, None), height=dp(44))
         self.browse_btn.bind(on_release=self.on_browse)
         brow.add_widget(self.browse_btn)
-        self.default_btn = F(Button, text="恢复默认")
+        self.default_btn = F(MDFlatButton, text="恢复默认",
+                             size_hint=(1, None), height=dp(44))
         self.default_btn.bind(on_release=self.on_default_dest)
         brow.add_widget(self.default_btn)
-        self.auth_btn = F(Button, text="开全部文件权限")
+        self.auth_btn = F(MDFlatButton, text="开全部文件权限",
+                          size_hint=(1, None), height=dp(44))
         self.auth_btn.bind(on_release=self.on_all_files_auth)
         brow.add_widget(self.auth_btn)
         self.add_widget(brow)
 
-        # 文件夹浏览器改成弹窗: 内嵌面板在部分机器上会跟外层滚动布局
-        # 互相干扰, 浏览目录行会被压到上级行下面重叠, 列表区也会塌到 0 高。
-        # 弹窗独立于主界面布局, 不参与主表单的高度计算, 从根上杜绝重叠。
-        _pop_content = BoxLayout(orientation="vertical", spacing=dp(8))
+        # 文件夹浏览器改成 MDDialog: 内嵌面板在部分机器上会跟外层滚动
+        # 布局互相干扰, 浏览目录行会被压到上级行下面重叠, 列表区也会塌
+        # 到 0 高。弹窗独立于主界面布局, 不参与主表单的高度计算, 从根
+        # 上杜绝重叠。文件夹名可能是中文, 列表行沿用普通 Button (F()
+        # 直接设 CJK 字体), 不走 KivyMD 的列表项。
+        _pop_content = MDBoxLayout(orientation="vertical", spacing=dp(8),
+                                   size_hint_y=None, height=dp(420))
         # 路径栏固定单行、超长打省略号: 之前自适应换行会让长路径
         # 撑高、反过来挤占列表区的空间。完整路径仍在下方「下载目录」里。
         self.browser_path_label = F(Label, text="", size_hint_y=None, height=dp(24),
@@ -238,52 +282,55 @@ class DownloaderUI(BoxLayout):
             width=lambda *_: setattr(self.browser_path_label, "text_size",
                                      (self.browser_path_label.width, None)))
         _pop_content.add_widget(self.browser_path_label)
-        nrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
-        self.newdir_input = F(TextInput, hint_text="新文件夹名",
-                              multiline=False)
+        nrow = MDBoxLayout(orientation="horizontal", size_hint_y=None,
+                           height=dp(56), spacing=dp(8))
+        self.newdir_input = F(MDTextField, hint_text="新文件夹名",
+                              mode="rectangle", size_hint_y=None, height=dp(56))
         nrow.add_widget(self.newdir_input)
-        self.mkdir_btn = F(Button, text="新建", size_hint_x=None, width=dp(72))
+        self.mkdir_btn = F(MDFlatButton, text="新建",
+                           size_hint=(None, None), size=(dp(72), dp(48)))
         self.mkdir_btn.bind(on_release=self.on_mkdir)
         nrow.add_widget(self.mkdir_btn)
         _pop_content.add_widget(nrow)
-        # 弹窗尺寸固定, 列表区用弹性高度即可, 不会再被压没。
+        # 弹窗内容固定高度, 列表区用弹性高度即可, 不会再被压没。
         self.browser_scroll = ScrollView(size_hint=(1, 1))
         self.browser_list = BoxLayout(orientation="vertical", size_hint_y=None)
         self.browser_list.bind(minimum_height=self.browser_list.setter("height"))
         self.browser_scroll.add_widget(self.browser_list)
         _pop_content.add_widget(self.browser_scroll)
-        brow2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8))
-        self.up_btn = F(Button, text="上级")
-        self.up_btn.bind(on_release=self.on_browse_up)
-        brow2.add_widget(self.up_btn)
-        self.select_btn = F(Button, text="选定当前目录")
-        self.select_btn.bind(on_release=self.on_browse_select)
-        brow2.add_widget(self.select_btn)
-        self.close_btn = F(Button, text="关闭")
-        self.close_btn.bind(on_release=self.on_browse_close)
-        brow2.add_widget(self.close_btn)
-        _pop_content.add_widget(brow2)
-        self.browser_popup = Popup(title="选择下载目录", content=_pop_content,
-                                   size_hint=(0.92, 0.72), auto_dismiss=False)
+        _up = F(MDFlatButton, text="上级")
+        _up.bind(on_release=self.on_browse_up)
+        _sel = F(MDFlatButton, text="选定当前目录")
+        _sel.bind(on_release=self.on_browse_select)
+        _close = F(MDFlatButton, text="关闭")
+        _close.bind(on_release=self.on_browse_close)
+        self.browser_dialog = MDDialog(title="选择下载目录", type="custom",
+                                       content_cls=_pop_content,
+                                       buttons=[_up, _sel, _close])
         self.browse_dir = ""
 
-        mrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(40), spacing=dp(8))
-        self.merge_cb = CheckBox(size_hint_x=None, width=dp(36), active=False)
+        mrow = MDBoxLayout(orientation="horizontal", size_hint_y=None,
+                           height=dp(48), spacing=dp(8))
+        self.merge_cb = MDCheckbox(size_hint=(None, None),
+                                   size=(dp(48), dp(48)), active=False)
         mrow.add_widget(self.merge_cb)
-        mrow.add_widget(F(Label, text="下载完成后按集序合并成一个整体视频",
-                          halign="left"))
+        mrow.add_widget(F(MDLabel, text="下载完成后按集序合并成一个整体视频",
+                          size_hint=(1, None), height=dp(48), valign="middle"))
         self.add_widget(mrow)
 
-        self.dl_btn = F(Button, text="开始下载", size_hint_y=None, height=dp(52),
-                        disabled=True)
+        self.dl_btn = F(MDRaisedButton, text="开始下载", size_hint=(1, None),
+                        height=dp(52), disabled=True)
         self.dl_btn.bind(on_release=self.on_download)
         self.add_widget(self.dl_btn)
 
-        self.ff_btn = F(Button, text="检测原生 ffmpeg", size_hint_y=None, height=dp(44))
+        self.ff_btn = F(MDFlatButton, text="检测原生 ffmpeg",
+                        size_hint=(1, None), height=dp(44))
         self.ff_btn.bind(on_release=self.on_check_ffmpeg)
         self.add_widget(self.ff_btn)
 
-        self.dir_label = _wrap_label("", font_size=sp(12))
+        self.dir_label = F(MDLabel, text="", adaptive_height=True,
+                           size_hint_y=None, theme_text_color="Secondary",
+                           font_style="Caption")
         self.add_widget(self.dir_label)
 
         scroll = ScrollView(size_hint=(1, None), height=dp(200))
@@ -295,9 +342,10 @@ class DownloaderUI(BoxLayout):
         self.log_list.bind(minimum_height=self.log_list.setter("height"))
         scroll.add_widget(self.log_list)
         self.log_lines = []
-        # 日志区不放进可滚动表单, 由 build() 固定在屏幕底部: 否则表单
-        # 高于屏幕时日志区被挤到屏幕外, 下载时看不到日志在滚; 而且嵌套
-        # 在外层 ScrollView 里时, 手指滑日志区会被外层抢走、划不动。
+        # 日志区不放进可滚动表单, 由 build() 包进 MDCard 固定在屏幕
+        # 底部: 否则表单高于屏幕时日志区被挤到屏幕外, 下载时看不到日志
+        # 在滚; 而且嵌套在外层 ScrollView 里时, 手指滑日志区会被外层
+        # 抢走、划不动。
         self._scroll = scroll
         self.log_scroll = scroll
 
@@ -372,7 +420,7 @@ class DownloaderUI(BoxLayout):
         else:
             self.browse_dir = download_base()
         self._refresh_browser()
-        self.browser_popup.open()
+        self.browser_dialog.open()
 
     def _refresh_browser(self):
         self.browser_path_label.text = f"浏览: {self.browse_dir}"
@@ -410,11 +458,11 @@ class DownloaderUI(BoxLayout):
         self.dest_input.text = self.browse_dir
         save_dest(self.browse_dir)
         self._set_dir_label(self.browse_dir)
-        self.browser_popup.dismiss()
+        self.browser_dialog.dismiss()
         self.ui_log(f"已选择保存目录: {self.browse_dir}")
 
     def on_browse_close(self, *_):
-        self.browser_popup.dismiss()
+        self.browser_dialog.dismiss()
 
     def on_mkdir(self, *_):
         name = hd.sanitize((self.newdir_input.text or "").strip())
@@ -452,16 +500,35 @@ class DownloaderUI(BoxLayout):
             w.disabled = busy
         self.probe_btn.disabled = busy or not (self.detail or self.single_vid)
         self.dl_btn.disabled = busy or not self.rows
-        self.quality.disabled = busy or not self.rows
+        self.quality_btn.disabled = busy or not self.rows
         if stage:
             self.info_label.text = stage
 
     def _parse_raw_id(self):
-        raw = (self.id_input.text or "").strip()
-        m = re.search(r"series_id=(\d+)", raw)
-        if m:
-            raw = m.group(1)
-        return hd.split_episode_token(raw)
+        # 播放页 / 详情页链接直接取 id, 其余输入原样交给核心解析。
+        return hd.extract_id((self.id_input.text or "").strip())
+
+    def _open_quality_menu(self, *_):
+        if not self.quality_values:
+            return
+        if self.quality_menu:
+            self.quality_menu.dismiss()
+        items = [{"viewclass": "OneLineListItem", "text": v,
+                  "on_release": lambda _item, v=v: self._select_quality(v)}
+                 for v in self.quality_values]
+        self.quality_menu = MDDropdownMenu(caller=self.quality_btn,
+                                           items=items, width_mult=4)
+        self.quality_menu.open()
+
+    def _select_quality(self, value):
+        try:
+            self.quality_index = self.quality_values.index(value)
+        except ValueError:
+            self.quality_index = 0
+        self.quality_btn.text = value
+        if self.quality_menu:
+            self.quality_menu.dismiss()
+            self.quality_menu = None
 
     # ------------------------------------------------------------------ 流程
     def on_get_info(self, *_):
@@ -473,8 +540,12 @@ class DownloaderUI(BoxLayout):
             return
         self._set_busy(True, "正在获取剧集信息...")
         self.detail, self.vids, self.single_vid, self.rows = None, [], "", []
-        self.quality.values = ()
-        self.quality.text = "先查询分辨率"
+        self.quality_values = []
+        self.quality_index = 0
+        self.quality_btn.text = "先查询分辨率"
+        if self.quality_menu:
+            self.quality_menu.dismiss()
+            self.quality_menu = None
 
         def work():
             try:
@@ -547,18 +618,14 @@ class DownloaderUI(BoxLayout):
 
     @mainthread
     def _fill_quality(self, values):
-        self.quality.values = values
-        self.quality.text = values[0]
+        self.quality_values = list(values)
+        self.quality_index = 0
+        self.quality_btn.text = values[0]
 
     def _chosen_quality(self):
         if not self.rows:
             return "1080"
-        idx = 0
-        try:
-            idx = self.quality.values.index(self.quality.text)
-        except ValueError:
-            idx = 0
-        return self.rows[idx]["q"]
+        return self.rows[self.quality_index]["q"]
 
     def on_download(self, *_):
         if self.busy or not self.rows:
@@ -600,19 +667,26 @@ class DownloaderUI(BoxLayout):
                 self.ui_log(f"下载出错: {e}")
                 self._set_busy(False, "下载出错")
 
-        threading.Thread(target=work, daemon=True).start()
 
-
-class HongGuoApp(App):
+class HongGuoApp(MDApp):
     def build(self):
-        # 表单放进 ScrollView (内容高于屏幕时可滚动); 日志区固定在屏幕
-        # 底部、一直在视野里, 下载时日志滚动可见, 手指也能直接划日志区。
+        self.theme_cls.primary_palette = "Teal"
+        self.theme_cls.accent_palette = "Amber"
+        self.theme_cls.theme_style = "Light"
         ui = DownloaderUI()
-        root = BoxLayout(orientation="vertical")
+        root = MDBoxLayout(orientation="vertical")
+        # 顶栏: 中文标题靠模块顶部把 Roboto 重注册成 CJK 字体来显示。
+        root.add_widget(F(MDTopAppBar, title="红果短剧下载器", elevation=4,
+                          size_hint=(1, None), height=dp(56)))
         form_scroll = ScrollView(size_hint=(1, 1))
         form_scroll.add_widget(ui)
         root.add_widget(form_scroll)
-        root.add_widget(ui.log_scroll)
+        # 日志区包进带阴影的卡片, 固定在屏幕底部、一直在视野里,
+        # 下载时日志滚动可见, 手指也能直接划日志区。
+        card = MDCard(orientation="vertical", size_hint=(1, None),
+                      height=dp(200), elevation=2, padding=dp(8))
+        card.add_widget(ui.log_scroll)
+        root.add_widget(card)
         return root
 
 

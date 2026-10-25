@@ -990,6 +990,31 @@ def split_episode_token(token):
     return t
 
 
+def extract_id(raw):
+    """从用户输入里提取 series_id / vid, 支持的输入 (原先的全部保留):
+      - 纯数字 series_id / vid
+      - 详情页 URL: https://hongguoduanju.com/detail?series_id=xxxx
+      - 播放页 URL: https://hongguoduanju.com/player/xxxx
+        (实测 2026-10-25: /player/{id} 的 id 就是 series_id, 播放页
+         _ROUTER_DATA 里 publicVideoSeo.seriesId 与路径 id 一致,
+         itemId 才是当集 vid, 且是详情 vid_list 的第 1 集; 故播放页
+         链接按整剧处理, 与详情页链接等价)
+      - 详情页路径 URL: https://hongguoduanju.com/detail/xxxx
+      - hg-series-v1: / hg-episode-v1: 前缀 token
+    提取不到数字时返回原串经 split_episode_token 处理的结果, 供后续判错。"""
+    t = str(raw or "").strip()
+    m = re.search(r"series_id=(\d+)", t)
+    if m:
+        return m.group(1)
+    m = re.search(r"/player/(\d+)", t)
+    if m:
+        return m.group(1)
+    m = re.search(r"/detail/(\d+)", t)
+    if m:
+        return m.group(1)
+    return split_episode_token(t)
+
+
 def log_env(device_id, install_id):
     ff = find_ffmpeg()
     log(f"AES 后端: {_AES_BACKEND} | 解密: "

@@ -18,7 +18,7 @@ source.include_exts = py
 # (str) Application versioning (method 1)
 # 1.2: 新增用户手动选择下载目录 (1.1 的 build1 因网络下载失败, 从未出包,
 # 所以 1.2 才是第一版真正要装的包)
-version = 1.3
+version = 1.4
 
 # (list) Application requirements
 # ffmpeg + av_codecs 是 v2 的关键: p4a 的 ffmpeg 配方把 ffmpeg 可执行文件
@@ -39,7 +39,7 @@ version = 1.3
 # 所以需求名故意写下划线 charset_normalizer==3.3.2, 使跳过检查命中、
 # 3.5.2 URL 不再进入最终安装; p4a-recipes/ 下的连字符配方目录此后不再被匹配,
 # 留置不用。pip 按 PEP 503 视下划线与连字符为同一包, 不影响安装。
-requirements = python3,kivy,requests,certifi,urllib3,idna,charset_normalizer==3.3.2,pycryptodome,ffmpeg,av_codecs
+requirements = python3,kivy,kivymd==1.2.0,pillow,requests,certifi,urllib3,idna,charset_normalizer==3.3.2,pycryptodome,ffmpeg,av_codecs
 
 # (str) p4a 本地配方目录: 配方名即子目录名, 须与 requirements 里的
 # 包名一致 (charset-normalizer)。CI 上同样要把 p4a-recipes/ 推上去,
