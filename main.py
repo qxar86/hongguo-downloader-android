@@ -661,17 +661,22 @@ class DownloaderUI(MDBoxLayout):
 
         def work():
             try:
+                # 每一步都先打一行日志: 万一卡住, 日志停在哪一步就
+                # 说明卡在哪一步, 不再是只显示「下载中」却看不到进展。
+                self.ui_log("下载线程已启动...")
                 base, fell_back = self.resolve_dest()
                 if fell_back:
                     self.ui_log(f"所选目录不可写, 已回退到默认目录: {base} "
                                 f"(公共目录请先开「所有文件访问权限」)")
                 self._set_dir_label(base)
+                self.ui_log(f"保存目录: {base}")
                 if self.single_vid:
                     os.makedirs(base, exist_ok=True)
                     path = os.path.join(base, f"{self.single_vid}.mp4")
                     if os.path.exists(path):
                         self.ui_log(f"跳过已存在: {path}")
                     else:
+                        self.ui_log(f"单集下载 vid={self.single_vid} ({want_q}p)...")
                         q, size, meta, method = hd.download_episode_to_file(
                             self.single_vid, want_q, self.device_id,
                             self.install_id, path)
@@ -680,6 +685,8 @@ class DownloaderUI(MDBoxLayout):
                     eps = self._selected_eps()
                     title = hd.sanitize(self.detail.get("series_name") or "hongguo")
                     outdir = os.path.join(base, title)
+                    self.ui_log(f"开始下载 {len(eps)} 集 (共 {len(self.vids)} 集), "
+                                f"{want_q}p, 5 线程并行, 保存到: {outdir}")
                     hd._download_episodes(eps, self.vids, outdir, want_q,
                                           self.device_id, self.install_id, False,
                                           merge=merge, title=title)
