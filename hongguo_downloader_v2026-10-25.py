@@ -104,7 +104,7 @@ APP_UA = ("com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; "
 MEDIA_UA = "com.phoenix.read/71332"
 QUALITY_ORDER = ["2160", "1440", "1080", "720", "576", "540", "480", "360"]
 
-__VERSION__ = "2026-10-25.6"  # 每次改动加一档, 启动时打印, 供截图核对版本
+__VERSION__ = "2026-10-25.7"  # 每次改动加一档, 启动时打印, 供截图核对版本
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept-Encoding": "identity"})
@@ -1138,10 +1138,40 @@ def _mp4_duration(path):
     return None
 
 
+def _probe_duration(path):
+    """用 ffprobe 读文件时长 (秒)。ffprobe 一般和 ffmpeg 在同一目录
+    (Windows 上就是 ffprobe.exe, 在 exe/ffmpeg.exe 旁边), 找不到时用 PATH
+    里的 ffprobe; 都没有则回落到手写的 _mp4_duration (只读 mvhd)。
+    ffprobe 的 format duration 是 ffmpeg 自己算的时长, 合并前后用同一把
+    尺子量, 不会像手写 mvhd 解析那样和 ffmpeg 的结果对不上。"""
+    ff = find_ffmpeg()
+    candidates = []
+    if ff:
+        d = os.path.dirname(ff)
+        candidates.append(os.path.join(d, "ffprobe.exe"))
+        candidates.append(os.path.join(d, "ffprobe"))
+    ffprobe = next((c for c in candidates if c and os.path.isfile(c)), None)
+    if not ffprobe:
+        ffprobe = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if ffprobe:
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", path],
+                capture_output=True, timeout=60)
+            if r.returncode == 0:
+                return float((r.stdout or b"").decode("utf-8", "ignore").strip())
+        except Exception:  # noqa: BLE001
+            pass
+    return _mp4_duration(path)
+
+
 def merge_videos(paths, out_path):
     """按给定顺序用 ffmpeg concat 分离器 + 流拷贝合并 mp4 (不重编码)。
     各集须同编码/同分辨率 (本下载器同剧同档下载天然满足)。
-    成功返回 True; 无 ffmpeg 或合并/校验失败返回 False (单集文件不受影响)。"""
+    成功返回 True; 无 ffmpeg 或合并失败返回 False (单集文件不受影响)。
+    时长校验用 ffprobe 量合并前后 (同一把尺子); 校验不通过时产物保留
+    不删除, 只记警告并逐集打出时长对照, 供抽查播放/定位异常集数。"""
     ff = find_ffmpeg()
     if not ff:
         log("合并跳过: 未找到 ffmpeg (合并必须用 ffmpeg, 请把它放到 py 同目录或 PATH)")
@@ -1171,18 +1201,25 @@ def merge_videos(paths, out_path):
     if not (os.path.isfile(out_path) and os.path.getsize(out_path) > 1024):
         log("合并失败: 产物为空")
         return False
-    # 时长校验: 合并时长应约等于各集时长之和 (流拷贝不改时长)
-    durs = [_mp4_duration(p) for p in paths]
-    merged_dur = _mp4_duration(out_path)
-    if merged_dur and all(durs):
+    # 时长校验: 合并时长应约等于各集时长之和 (流拷贝不改时长)。
+    # 旧版只读 mvhd 手算, 个别集数的 mvhd 时长与实际流时长对不上
+    # (源文件带 edit list / 非零起始时间戳时常见), 求和会系统性偏小,
+    # 而 ffmpeg 合出来的文件按真实包时间戳计, 两边能差出 20% 以上,
+    # 于是好好的合并也被判失败删掉。改成 ffprobe 两边同尺子量。
+    durs = [_probe_duration(p) for p in paths]
+    merged_dur = _probe_duration(out_path)
+    if merged_dur and all(d is not None for d in durs):
         total = sum(durs)
         if abs(merged_dur - total) > max(3.0, total * 0.02):
-            log(f"合并失败: 时长校验不通过 (合并 {merged_dur:.1f}s vs 各集之和 {total:.1f}s), "
-                f"删除异常产物")
-            try:
-                os.remove(out_path)
-            except OSError:
-                pass
+            log(f"合并警告: 时长校验不通过 (合并 {merged_dur:.1f}s vs 各集之和 "
+                f"{total:.1f}s, 差 {merged_dur - total:+.1f}s), 产物已保留未删除, "
+                f"请抽查播放确认 (拖到中间/结尾看画面是否正常、有无重复段落)")
+            for pth, d in zip(paths, durs):
+                mv = _mp4_duration(pth)
+                flag = ""
+                if mv and abs(d - mv) > 2:
+                    flag = f" (mvhd {mv:.1f}s, 与 ffprobe 差 {d - mv:+.1f}s, 该集元数据异常)"
+                log(f"  {os.path.basename(pth)}: {d:.1f}s{flag}")
             return False
         log(f"合并完成: {out_path} ({os.path.getsize(out_path)/1e6:.2f} MB, "
             f"{len(paths)} 集, 总时长 {merged_dur/60:.1f} 分钟)")
