@@ -1064,38 +1064,106 @@ def _mp4_duration(path):
     return None
 
 
-def merge_videos(paths, out_path):
-    """按给定顺序用 ffmpeg concat 分离器 + 流拷贝合并 mp4 (不重编码)。
-    各集须同编码/同分辨率 (本下载器同剧同档下载天然满足)。
-    成功返回 True; 无 ffmpeg 或合并/校验失败返回 False (单集文件不受影响)。"""
-    ff = find_ffmpeg()
-    if not ff:
-        log("合并跳过: 未找到 ffmpeg (合并必须用 ffmpeg, 请把它放到 py 同目录或 PATH)")
-        return False
-    list_path = out_path + ".concat.txt"
+def _fsize(p):
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return 0
+
+
+def _rm_file(p):
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+
+
+def _concat_files(ff, files, out):
+    """一次 ffmpeg concat 分离器 + 流拷贝, 把 files 合成 out。成功返回 True。"""
+    list_path = out + ".concat.txt"
     try:
         with open(list_path, "w", encoding="utf-8") as f:
-            for p in paths:
+            for p in files:
                 ap = os.path.abspath(p).replace("'", "'\\''")
                 f.write(f"file '{ap}'\n")
         cmd = [ff, "-y", "-v", "error", "-f", "concat", "-safe", "0",
-               "-i", list_path, "-c", "copy", out_path]
+               "-i", list_path, "-c", "copy", out]
         r = subprocess.run(cmd, capture_output=True, timeout=3600)
         if r.returncode != 0:
             tail = (r.stderr or b"").decode("utf-8", "ignore").strip().splitlines()
             log(f"合并失败: ffmpeg 退出 {r.returncode} "
                 f"{tail[-1] if tail else ''}")
             return False
+        return True
     except Exception as e:  # noqa: BLE001
         log(f"合并失败: {e}")
         return False
     finally:
-        try:
-            os.remove(list_path)
-        except OSError:
-            pass
+        _rm_file(list_path)
+
+
+def merge_videos(paths, out_path):
+    """按给定顺序用 ffmpeg concat 分离器 + 流拷贝合并 mp4 (不重编码)。
+    各集须同编码/同分辨率 (本下载器同剧同档下载天然满足)。
+    集数多时分批合并 (每批 100 集): 单次 concat 文件数太多时,
+    这些 HEVC 源的头信息/时间戳问题会让 ffmpeg 在中途悄悄丢内容
+    (1000 集曾只合出约 200 集、1.36GB, 却正常退出报“合并完成”),
+    分批后每批独立校验, 坏文件只影响所在批; 最后再把各批拼成整体。
+    成功返回 True; 无 ffmpeg 或合并/校验失败返回 False (单集文件不受影响)。"""
+    ff = find_ffmpeg()
+    if not ff:
+        log("合并跳过: 未找到 ffmpeg (合并必须用 ffmpeg, 请把它放到 py 同目录或 PATH)")
+        return False
+    total_in_size = sum(_fsize(p) for p in paths)
+    BATCH = 100
+    batches = [paths[i:i + BATCH] for i in range(0, len(paths), BATCH)]
+    parts = []
+    try:
+        for bi, batch in enumerate(batches):
+            part = out_path if len(batches) == 1 else f"{out_path}.part{bi}.mp4"
+            if not _concat_files(ff, batch, part):
+                log(f"合并失败: 第 {bi + 1}/{len(batches)} 批 "
+                    f"({len(batch)} 集) 合并失败")
+                for p in parts:
+                    _rm_file(p)
+                return False
+            if len(batches) > 1:
+                parts.append(part)
+                got = _fsize(part)
+                want = sum(_fsize(p) for p in batch)
+                if got <= 1024:
+                    log(f"合并失败: 第 {bi + 1}/{len(batches)} 批产物为空")
+                    for p in parts:
+                        _rm_file(p)
+                    return False
+                if want and got < want * 0.8:
+                    log(f"提示: 第 {bi + 1}/{len(batches)} 批合并后偏小 "
+                        f"({got/1e6:.1f}MB vs 该批 {want/1e6:.1f}MB), "
+                        f"可能丢了内容, 仍继续合并其余批")
+        if len(batches) > 1:
+            log(f"开始合并 {len(parts)} 个分片 -> {out_path}")
+            if not _concat_files(ff, parts, out_path):
+                log("合并失败: 合并分片失败")
+                for p in parts:
+                    _rm_file(p)
+                return False
+            for p in parts:
+                _rm_file(p)
+    except Exception as e:  # noqa: BLE001
+        log(f"合并失败: {e}")
+        for p in parts:
+            _rm_file(p)
+        return False
     if not (os.path.isfile(out_path) and os.path.getsize(out_path) > 1024):
         log("合并失败: 产物为空")
+        return False
+    # 大小校验: 流拷贝不改内容, 合并后大小应约等于各集大小之和;
+    # 明显偏小说明 concat 丢了内容, 不能再报“合并完成”。
+    got_size = os.path.getsize(out_path)
+    if total_in_size and got_size < total_in_size * 0.8:
+        log(f"合并失败: 大小校验不通过 (合并 {got_size/1e6:.1f}MB vs 各集之和 "
+            f"{total_in_size/1e6:.1f}MB), 删除异常产物")
+        _rm_file(out_path)
         return False
     # 时长校验: 流拷贝不会丢内容, 但 concat 会把各集的时间戳偏移
     # (这些 HEVC 源常带 edit list / 非零起始时间) 累进合并后的 mvhd,
@@ -1109,18 +1177,15 @@ def merge_videos(paths, out_path):
         if merged_dur < total - tol:
             log(f"合并失败: 时长校验不通过 (合并 {merged_dur:.1f}s 明显短于各集之和 {total:.1f}s), "
                 f"删除异常产物")
-            try:
-                os.remove(out_path)
-            except OSError:
-                pass
+            _rm_file(out_path)
             return False
         extra = (f" (提示: 比各集之和长 {merged_dur - total:.1f}s, "
                  f"为 concat 时间戳偏移所致, 内容完整)"
                  if merged_dur > total + tol else "")
-        log(f"合并完成: {out_path} ({os.path.getsize(out_path)/1e6:.2f} MB, "
+        log(f"合并完成: {out_path} ({got_size/1e6:.2f} MB, "
             f"{len(paths)} 集, 总时长 {merged_dur/60:.1f} 分钟){extra}")
     else:
-        log(f"合并完成: {out_path} ({os.path.getsize(out_path)/1e6:.2f} MB, "
+        log(f"合并完成: {out_path} ({got_size/1e6:.2f} MB, "
             f"{len(paths)} 集, 时长未校验)")
     return True
 
