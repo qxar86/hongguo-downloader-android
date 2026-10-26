@@ -1097,21 +1097,28 @@ def merge_videos(paths, out_path):
     if not (os.path.isfile(out_path) and os.path.getsize(out_path) > 1024):
         log("合并失败: 产物为空")
         return False
-    # 时长校验: 合并时长应约等于各集时长之和 (流拷贝不改时长)
+    # 时长校验: 流拷贝不会丢内容, 但 concat 会把各集的时间戳偏移
+    # (这些 HEVC 源常带 edit list / 非零起始时间) 累进合并后的 mvhd,
+    # 使合并时长比各集之和虚长, 所以只按「明显变短」判失败 (变短 =
+    # 内容丢了, 才是真的坏了); 变长只提示、保留产物。
     durs = [_mp4_duration(p) for p in paths]
     merged_dur = _mp4_duration(out_path)
     if merged_dur and all(durs):
         total = sum(durs)
-        if abs(merged_dur - total) > max(3.0, total * 0.02):
-            log(f"合并失败: 时长校验不通过 (合并 {merged_dur:.1f}s vs 各集之和 {total:.1f}s), "
+        tol = max(3.0, total * 0.02)
+        if merged_dur < total - tol:
+            log(f"合并失败: 时长校验不通过 (合并 {merged_dur:.1f}s 明显短于各集之和 {total:.1f}s), "
                 f"删除异常产物")
             try:
                 os.remove(out_path)
             except OSError:
                 pass
             return False
+        extra = (f" (提示: 比各集之和长 {merged_dur - total:.1f}s, "
+                 f"为 concat 时间戳偏移所致, 内容完整)"
+                 if merged_dur > total + tol else "")
         log(f"合并完成: {out_path} ({os.path.getsize(out_path)/1e6:.2f} MB, "
-            f"{len(paths)} 集, 总时长 {merged_dur/60:.1f} 分钟)")
+            f"{len(paths)} 集, 总时长 {merged_dur/60:.1f} 分钟){extra}")
     else:
         log(f"合并完成: {out_path} ({os.path.getsize(out_path)/1e6:.2f} MB, "
             f"{len(paths)} 集, 时长未校验)")
