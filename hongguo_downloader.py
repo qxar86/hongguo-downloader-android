@@ -98,6 +98,13 @@ QUALITY_ORDER = ["2160", "1440", "1080", "720", "576", "540", "480", "360"]
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept-Encoding": "identity"})
+# 并行下载要同时开很多连接到同一 CDN 主机: requests 默认连接池只有 10,
+# 超出会排队等空闲连接, 反而把多线程拖慢。按 8 集并行 x 每集 4 分段 =
+# 最多 32 个并发连接, 把池子放大到 64 (不考虑限流, 只求快)。
+from requests.adapters import HTTPAdapter as _HTTPAdapter
+_pool = _HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=0)
+SESSION.mount("https://", _pool)
+SESSION.mount("http://", _pool)
 
 
 def log(*a):
@@ -112,7 +119,9 @@ def retry(fn, times=3, desc=""):
         except Exception as e:  # noqa: BLE001
             last = e
             if i + 1 < times:
-                time.sleep(0.6 * (i + 1))
+                # 不考虑限流、只求快: 瞬时失败 0.2/0.4 秒就重发
+                # (之前 0.6/1.2 秒, 单次调用光等就要 1.8 秒)
+                time.sleep(0.2 * (i + 1))
     raise RuntimeError(f"{desc} 失败(重试{times}次): {last}")
 
 
@@ -893,11 +902,20 @@ def ffmpeg_decrypt(enc_path, out_path, key):
     return not _still_encrypted(out_path)
 
 
+# 分段并行下载: 单集文件切成 4 段、4 个连接同时拉 (HTTP Range), 单连接
+# 被限速时提速明显; 服务端不支持 Range 或文件太小则回退单连接。
+_DL_CHUNKS = 4
+_DL_MIN_CHUNKED = 4 * 1024 * 1024  # < 4MB 不分段 (分段的探针开销不划算)
+
+
 def _stream_download(url, path):
-    """流式下载到文件 (带简单进度), 返回字节数。"""
+    """流式下载到文件, 返回字节数。
+    优先分段并行 (Range, 4 段同时拉); 服务端不支持 Range / 拿不到总大小 /
+    文件 < 4MB 时回退单连接流式下载。分段按偏移直接写同一文件 (各段互不
+    重叠、无合并步骤); 任一段失败即抛, 外层重试会整集重下。"""
     headers = {"User-Agent": MEDIA_UA, "Referer": "https://novel.snssdk.com/"}
 
-    def _dl():
+    def _single():
         total = 0
         with SESSION.get(url, headers=headers, timeout=180, stream=True) as r:
             r.raise_for_status()
@@ -911,7 +929,66 @@ def _stream_download(url, path):
             raise RuntimeError(f"下载不完整: {total}/{expected}")
         return total
 
-    return retry(_dl, desc="媒体下载")
+    def _probe_total():
+        """1 字节 Range 探针: 返回 (支持 Range, 总字节数)。
+        206 + Content-Range 才算支持; 200 = 服务端忽略 Range。"""
+        probe_headers = dict(headers)
+        probe_headers["Range"] = "bytes=0-0"
+        try:
+            with SESSION.get(url, headers=probe_headers, timeout=30,
+                             stream=True) as r:
+                if r.status_code != 206:
+                    return False, 0
+                # Content-Range: bytes 0-0/<total>
+                m = re.search(r"/(\d+)\s*$", r.headers.get("Content-Range") or "")
+                return (True, int(m.group(1))) if m else (False, 0)
+        except Exception:  # noqa: BLE001 - 探针失败就回退单连接
+            return False, 0
+
+    def _download_range(start, end):
+        """下载 [start, end] 一段, 写到 path 的对应偏移处。"""
+        def _get():
+            rh = dict(headers)
+            rh["Range"] = f"bytes={start}-{end}"
+            with SESSION.get(url, headers=rh, timeout=180, stream=True) as r:
+                if r.status_code != 206:
+                    raise RuntimeError(f"分段下载被拒: HTTP {r.status_code}")
+                got = 0
+                with open(path, "r+b") as f:
+                    f.seek(start)
+                    for chunk in r.iter_content(chunk_size=256 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            got += len(chunk)
+            if got != end - start + 1:
+                raise RuntimeError(
+                    f"分段不完整: {start}-{end} 只拿到 "
+                    f"{got}/{end - start + 1}")
+        return retry(_get, desc=f"分段下载 {start}-{end}")
+
+    def _chunked():
+        ok, total = _probe_total()
+        if not ok or total < _DL_MIN_CHUNKED:
+            return _single()
+        # 预建文件并定长, 各段按偏移写 (无合并步骤, 无重叠竞争)
+        with open(path, "wb") as f:
+            f.truncate(total)
+        size = total // _DL_CHUNKS
+        bounds = []
+        for i in range(_DL_CHUNKS):
+            s = i * size
+            e = total - 1 if i == _DL_CHUNKS - 1 else (i + 1) * size - 1
+            bounds.append((s, e))
+        with ThreadPoolExecutor(max_workers=_DL_CHUNKS) as ex:
+            futs = [ex.submit(_download_range, s, e) for s, e in bounds]
+            for fut in as_completed(futs):
+                fut.result()
+        if os.path.getsize(path) != total:
+            raise RuntimeError(
+                f"下载不完整: {os.path.getsize(path)}/{total}")
+        return total
+
+    return retry(_chunked, desc="媒体下载")
 
 
 def download_episode(vid, want_quality, device_id, install_id):
@@ -951,8 +1028,9 @@ def download_episode_to_file(vid, want_quality, device_id, install_id, out_path,
     加密中间文件落在目标同名的 .enc.mp4, 成功后删除; 失败保留以便排查。
     失败自动重试: retries=10 表示首次失败后最多再试 10 次 (共 11 次尝试),
     每次重试都重新取 model/取真实 URL/派生密钥 (URL 可能过期, 换一次
-    可能就通了)。普通失败重试间隔 2/4/6... 秒递增、上限 20 秒; 空响应
-    (服务端限流期) 则 5/10/15... 秒递增、上限 60 秒, 风暴要靠等过去。"""
+    可能就通了)。重试间隔固定 0.5 秒、不考虑限流 (之前普通失败
+    2/4/6... 上限 20 秒、空响应 5/10/15... 上限 60 秒, 一个总失败
+    的集光等就要 2 分钟)。"""
     retries = _parse_retries(retries)
     last_err = None
     for attempt in range(retries + 1):
@@ -969,12 +1047,9 @@ def download_episode_to_file(vid, want_quality, device_id, install_id, out_path,
             except OSError:
                 pass
             if attempt < retries:
-                # 空响应 = 服务端限流期: 等久一点 (5/10/15... 上限 60 秒),
-                # 别拿 2 秒间隔去刷它; 其他失败保持 2/4/6... 上限 20 秒。
-                if "空响应" in str(e):
-                    wait = min(5 * (attempt + 1), 60)
-                else:
-                    wait = min(2 * (attempt + 1), 20)
+                # 不考虑限流、只求快: 固定等 0.5 秒就立即重试。瞬时失败
+                # 连试 11 次也只要几秒, 不会卡住整批。
+                wait = 0.5
                 log(f"vid={vid} 下载失败 (第{attempt + 1}/{retries + 1}次尝试): "
                     f"{e}, {wait} 秒后自动重试 ({attempt + 1}/{retries})...")
                 time.sleep(wait)
@@ -1244,11 +1319,12 @@ def merge_videos(paths, out_path):
 
 
 def _download_episodes(eps, vids, outdir, want_q, device_id, install_id, overwrite,
-                       merge=False, title="", max_workers=5, retries=10):
+                       merge=False, title="", max_workers=8, retries=10):
     """整剧批量下载 (CLI 与交互模式共用), 返回退出码。
     多集并行: 各集写各自的文件 (中间文件为目标同名的 .enc.mp4, 互不干扰),
-    日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 5 集
-    并发, max_workers<=1 时退回单线程顺序下载 (线程池 worker 数为 1)。
+    日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 8 集
+    并发 (每集内部还 4 分段并行拉流), max_workers<=1 时退回单线程顺序
+    下载 (线程池 worker 数为 1)。
     merge=True 时, 全部下完后把成功集数按集序合并为一个整体视频 (单集文件保留)。
     单集失败自动重试 retries 次 (默认 10, 共 11 次尝试), 整集级重试在
     download_episode_to_file 内 (每次重试重取 model/真实 URL/派生密钥)。"""
