@@ -686,7 +686,7 @@ class DownloaderUI(MDBoxLayout):
                     title = hd.sanitize(self.detail.get("series_name") or "hongguo")
                     outdir = os.path.join(base, title)
                     self.ui_log(f"开始下载 {len(eps)} 集 (共 {len(self.vids)} 集), "
-                                f"{want_q}p, 5 线程并行, 保存到: {outdir}")
+                                f"{want_q}p, 8 线程并行 (每集 4 分段), 保存到: {outdir}")
                     hd._download_episodes(eps, self.vids, outdir, want_q,
                                           self.device_id, self.install_id, False,
                                           merge=merge, title=title)
