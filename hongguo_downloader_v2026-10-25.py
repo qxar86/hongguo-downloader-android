@@ -104,7 +104,7 @@ APP_UA = ("com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; "
 MEDIA_UA = "com.phoenix.read/71332"
 QUALITY_ORDER = ["2160", "1440", "1080", "720", "576", "540", "480", "360"]
 
-__VERSION__ = "2026-10-25.7"  # 每次改动加一档, 启动时打印, 供截图核对版本
+__VERSION__ = "2026-10-25.8"  # 每次改动加一档, 启动时打印, 供截图核对版本
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept-Encoding": "identity"})
@@ -662,7 +662,20 @@ def video_model(vid, device_id, install_id):
         r = SESSION.post(VIDEO_URL, params=params, data=body.encode("utf-8"),
                          headers=headers, timeout=30)
         r.raise_for_status()
-        return r.json()
+        # 服务端有时返回 HTTP 200 但 body 为空 (实测 2026-10-28 同一 vid
+        # 连试 8 次, 3 次成功 5 次空响应, 疑似服务端限流/抖动), 直接
+        # r.json() 只会报没头没尾的 "Expecting value: line 1 column 1"。
+        # 这里先验 body, 空响应按可重试失败处理, 交给 retry()/上层重试。
+        if not r.content:
+            raise RuntimeError(
+                f"video_model 返回空响应 (HTTP {r.status_code}, 0 字节, "
+                f"疑似服务端限流/抖动)")
+        try:
+            return r.json()
+        except ValueError as e:
+            raise RuntimeError(
+                f"video_model 返回非 JSON (HTTP {r.status_code}, "
+                f"{len(r.content)} 字节, 开头: {r.content[:80]!r}): {e}")
 
     resp = retry(_post, desc="video_model")
     data = resp.get("data")
@@ -1321,6 +1334,26 @@ def _ask(prompt, default=""):
     return s or default
 
 
+def _probe_quality(vids, eps, device_id, install_id, default_q="1080"):
+    """取分辨率列表 (交互模式用): 依次试计划里的前 3 集, 哪集拿到 model
+    就用哪集列分辨率 (同剧各集档位通常一致)。某集取不到 model 时不直接
+    炸掉整个程序: 服务端 video_model 接口本身会抖 (实测同一 vid 连试
+    8 次 3 成 5 空), 换一集通常就能拿到; 3 集都拿不到则默认 default_q
+    继续下载, 每集下载时还有 10 次重试兜底, 失败集最后汇总里能看到。"""
+    tried = []
+    for n in eps[:3]:
+        vid = vids[n - 1]
+        tried.append(n)
+        try:
+            model = video_model(vid, device_id, install_id)
+            return _choose_quality(model, f"以第{n}集为例")
+        except Exception as e:  # noqa: BLE001
+            log(f"取第{n}集分辨率失败: {e}, 换一集再试...")
+    log(f"连续 {len(tried)} 集都取不到分辨率列表, 默认用 {default_q}p 继续下载 "
+        f"(下载每集时还会自动重试, 失败的集最后会汇总)")
+    return default_q
+
+
 def _choose_quality(model, sample_desc):
     rows = available_resolutions(model)
     if not rows:
@@ -1373,8 +1406,13 @@ def run_interactive(first_id=None, is_vid=False, outdir_base="downloads",
             log(f"无法识别 id: {raw} (既不是有效 series_id, 也不是纯数字 vid)")
             return 1
         log(f"单集模式 vid={vid}")
-        model = video_model(vid, device_id, install_id)
-        want_q = _choose_quality(model, "该集")
+        try:
+            model = video_model(vid, device_id, install_id)
+            want_q = _choose_quality(model, "该集")
+        except Exception as e:  # noqa: BLE001
+            log(f"取该集分辨率失败: {e}, 默认用 1080p 继续下载 "
+                f"(下载时还会自动重试)")
+            want_q = "1080"
         os.makedirs(outdir_base, exist_ok=True)
         path = os.path.join(outdir_base, f"{vid}.mp4")
         if os.path.exists(path) and not overwrite:
@@ -1403,8 +1441,7 @@ def run_interactive(first_id=None, is_vid=False, outdir_base="downloads",
         log("没有有效的集数, 退出。")
         return 1
     log(f"计划下载 {len(eps)} 集: {eps if len(eps) <= 20 else str(eps[:20]) + ' ...'}")
-    model = video_model(vids[eps[0] - 1], device_id, install_id)
-    want_q = _choose_quality(model, f"以第{eps[0]}集为例")
+    want_q = _probe_quality(vids, eps, device_id, install_id)
     max_workers = _ask_threads(threads)
     merge = False
     if len(eps) >= 2:
@@ -1518,4 +1555,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log("已取消。")
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001
+        log(f"出错: {e}")
+        sys.exit(1)
