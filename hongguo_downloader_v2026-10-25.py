@@ -105,7 +105,14 @@ APP_UA = ("com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; "
 MEDIA_UA = "com.phoenix.read/71332"
 QUALITY_ORDER = ["2160", "1440", "1080", "720", "576", "540", "480", "360"]
 
-__VERSION__ = "2026-10-25.9"  # 每次改动加一档, 启动时打印, 供截图核对版本
+__VERSION__ = "2026-10-25.10"  # 每次改动加一档, 启动时打印, 供截图核对版本
+
+# 固定设备标识 (2026-10-28 用户提供, 替换原来每次随机生成的):
+# 之前每次启动都随机生成 device_id/install_id, 现在默认用下面这组固定值
+# (命令行 --device-id/--install-id 仍可覆盖)。注意: 这两个值会随代码
+# 一起出现, 推到公开仓库就等于公开, 介意的话不要推 GitHub。
+DEFAULT_DEVICE_ID = "41154853790009"
+DEFAULT_INSTALL_ID = "41154853794105"
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept-Encoding": "identity"})
@@ -160,6 +167,8 @@ def retry(fn, times=3, desc="", base_delay=0.6):
 
 def random_device_id():
     # jar: String.valueOf((long)(Math.random()*4875422447187506176 + 4861130398305394688))
+    # 2026-10-28 起默认改用上面固定的 DEFAULT_DEVICE_ID/DEFAULT_INSTALL_ID,
+    # 本函数仅保留作备用 (例如用户想恢复随机时调用)。
     return str(random.randint(4861130398305394688, 4861130398305394688 + 4875422447187506176))
 
 
@@ -1424,8 +1433,8 @@ def _choose_quality(model, sample_desc):
 def run_interactive(first_id=None, is_vid=False, outdir_base="downloads",
                     overwrite=False, device_id="", install_id="", merge_preset=None,
                     threads=None, retries=10):
-    device_id = device_id or random_device_id()
-    install_id = install_id or random_device_id()
+    device_id = device_id or DEFAULT_DEVICE_ID
+    install_id = install_id or DEFAULT_INSTALL_ID
     log(f"=== 红果短剧下载器 v{__VERSION__} (交互模式) ===")
     log_env(device_id, install_id)
 
@@ -1523,16 +1532,16 @@ def main(argv=None):
                     help="单集下载失败后自动重试次数: 0-20 (默认 10, 即首次失败后"
                          "最多再试 10 次, 共 11 次尝试; 0=不重试)")
     ap.add_argument("--list", action="store_true", help="只打印剧信息和集列表, 不下载")
-    ap.add_argument("--device-id", default="", help="固定 device_id (默认随机, 与 jar 一致)")
-    ap.add_argument("--install-id", default="", help="固定 install_id/iid (默认随机)")
+    ap.add_argument("--device-id", default="", help="固定 device_id (默认用内置固定值 41154853790009)")
+    ap.add_argument("--install-id", default="", help="固定 install_id/iid (默认用内置固定值 41154853794105)")
     ap.add_argument("--overwrite", action="store_true", help="已存在文件也重新下载")
     ap.add_argument("--merge", action="store_true",
                     help="全部集数下载完毕后, 按集数顺序用 ffmpeg 将它们合并成一个 "
                          "整体视频 (流拷贝不重编码, 需要 ffmpeg; 单集文件保留)")
     args = ap.parse_args(argv)
 
-    device_id = args.device_id or random_device_id()
-    install_id = args.install_id or random_device_id()
+    device_id = args.device_id or DEFAULT_DEVICE_ID
+    install_id = args.install_id or DEFAULT_INSTALL_ID
     want_q = re.search(r"\d+", str(args.quality))
     want_q = want_q.group(0) if want_q else "1080"
 
