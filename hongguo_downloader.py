@@ -934,10 +934,56 @@ def download_episode(vid, want_quality, device_id, install_id):
     raise RuntimeError(f"vid={vid} 下载/解密失败: {last_err}")
 
 
-def download_episode_to_file(vid, want_quality, device_id, install_id, out_path):
+def _parse_retries(value, default=10):
+    """解析重试次数: 失败后最多再试几次 (0=失败即放弃, 不重试)。
+    非法输入回落默认值; 上限 20, 防止误输过大把一集卡死。"""
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(20, n))
+
+
+def download_episode_to_file(vid, want_quality, device_id, install_id, out_path,
+                             retries=10):
     """单集全流程 (文件版) -> (quality, 文件字节数, video_meta, 解密方式)
     解密方式: 'ffmpeg' (优先) / 'python' (回退) / 'none' (源本身未加密)。
-    加密中间文件落在目标同目录的 .enc.mp4, 成功后删除; 失败保留以便排查。"""
+    加密中间文件落在目标同名的 .enc.mp4, 成功后删除; 失败保留以便排查。
+    失败自动重试: retries=10 表示首次失败后最多再试 10 次 (共 11 次尝试),
+    每次重试都重新取 model/取真实 URL/派生密钥 (URL 可能过期, 换一次
+    可能就通了)。普通失败重试间隔 2/4/6... 秒递增、上限 20 秒; 空响应
+    (服务端限流期) 则 5/10/15... 秒递增、上限 60 秒, 风暴要靠等过去。"""
+    retries = _parse_retries(retries)
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return _download_episode_to_file_once(
+                vid, want_quality, device_id, install_id, out_path)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            # 删掉本次失败留下的不完整成品, 免得被当成下好的集数 (enc 中间
+            # 文件保留, 以便排查; 下次重试下载时会覆盖它)
+            try:
+                if os.path.isfile(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
+            if attempt < retries:
+                # 空响应 = 服务端限流期: 等久一点 (5/10/15... 上限 60 秒),
+                # 别拿 2 秒间隔去刷它; 其他失败保持 2/4/6... 上限 20 秒。
+                if "空响应" in str(e):
+                    wait = min(5 * (attempt + 1), 60)
+                else:
+                    wait = min(2 * (attempt + 1), 20)
+                log(f"vid={vid} 下载失败 (第{attempt + 1}/{retries + 1}次尝试): "
+                    f"{e}, {wait} 秒后自动重试 ({attempt + 1}/{retries})...")
+                time.sleep(wait)
+    raise RuntimeError(f"vid={vid} 下载/解密失败 (已重试{retries}次, "
+                       f"共{retries + 1}次尝试): {last_err}")
+
+
+def _download_episode_to_file_once(vid, want_quality, device_id, install_id, out_path):
+    """单集全流程单次尝试 (不重试, 供 download_episode_to_file 循环调用)。"""
     prep = _prepare_episode(vid, want_quality, device_id, install_id)
     enc_path = out_path + ".enc.mp4"
     last_err = None
@@ -960,7 +1006,6 @@ def download_episode_to_file(vid, want_quality, device_id, install_id, out_path)
         except Exception as e:  # noqa: BLE001
             last_err = e
     raise RuntimeError(f"vid={vid} 下载/解密失败: {last_err}")
-
 
 # ----------------------------------------------------------------------------
 # CLI
@@ -1199,12 +1244,18 @@ def merge_videos(paths, out_path):
 
 
 def _download_episodes(eps, vids, outdir, want_q, device_id, install_id, overwrite,
-                       merge=False, title="", max_workers=5):
+                       merge=False, title="", max_workers=5, retries=10):
     """整剧批量下载 (CLI 与交互模式共用), 返回退出码。
     多集并行: 各集写各自的文件 (中间文件为目标同名的 .enc.mp4, 互不干扰),
     日志与结果汇总只在主线程做, 不存在跨线程写同一文件的竞争; 默认 5 集
     并发, max_workers<=1 时退回单线程顺序下载 (线程池 worker 数为 1)。
-    merge=True 时, 全部下完后把成功集数按集序合并为一个整体视频 (单集文件保留)。"""
+    merge=True 时, 全部下完后把成功集数按集序合并为一个整体视频 (单集文件保留)。
+    单集失败自动重试 retries 次 (默认 10, 共 11 次尝试), 整集级重试在
+    download_episode_to_file 内 (每次重试重取 model/真实 URL/派生密钥)。"""
+    os.makedirs(outdir, exist_ok=True)
+    ok, fail = 0, []
+    failed_eps = set()
+    total = len(vids)
     os.makedirs(outdir, exist_ok=True)
     ok, fail = 0, []
     failed_eps = set()
@@ -1214,7 +1265,7 @@ def _download_episodes(eps, vids, outdir, want_q, device_id, install_id, overwri
         vid = vids[n - 1]
         path = os.path.join(outdir, f"第{n:02d}集.mp4")
         q, size, _meta, method = download_episode_to_file(
-            vid, want_q, device_id, install_id, path)
+            vid, want_q, device_id, install_id, path, retries=retries)
         return n, vid, path, q, size, method
 
     jobs = []
