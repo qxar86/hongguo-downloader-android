@@ -200,8 +200,8 @@ class DownloaderUI(MDBoxLayout):
         self.vids = []              # vid 列表
         self.single_vid = ""        # 单集模式 vid
         self.rows = []              # available_resolutions 结果
-        self.device_id = hd.random_device_id()
-        self.install_id = hd.random_device_id()
+        self.device_id = hd.DEFAULT_DEVICE_ID
+        self.install_id = hd.DEFAULT_INSTALL_ID
         self.busy = False
         self.quality_values = []    # 分辨率弹窗列表的显示文案
         self.quality_index = 0      # 当前选中的分辨率下标
