@@ -121,6 +121,14 @@ def random_device_id():
     return str(random.randint(4861130398305394688, 4861130398305394688 + 4875422447187506176))
 
 
+# 固定设备标识 (2026-10-28 用户提供, 与桌面版同一组):
+# 之前每次启动都随机生成 device_id/install_id, 现在默认用下面这组固定值
+# (命令行 --device-id/--install-id 仍可覆盖)。注意: 这两个值会随代码
+# 一起出现, 推到公开仓库就等于公开。
+DEFAULT_DEVICE_ID = "41154853790009"
+DEFAULT_INSTALL_ID = "41154853794105"
+
+
 # ----------------------------------------------------------------------------
 # AES: 优先 pycryptodome / cryptography, 否则内置纯 Python 实现
 # ----------------------------------------------------------------------------
@@ -1299,8 +1307,8 @@ def _choose_quality(model, sample_desc):
 
 def run_interactive(first_id=None, is_vid=False, outdir_base="downloads",
                     overwrite=False, device_id="", install_id="", merge_preset=None):
-    device_id = device_id or random_device_id()
-    install_id = install_id or random_device_id()
+    device_id = device_id or DEFAULT_DEVICE_ID
+    install_id = install_id or DEFAULT_INSTALL_ID
     log("=== 红果短剧下载器 (交互模式) ===")
     log_env(device_id, install_id)
 
@@ -1388,16 +1396,16 @@ def main(argv=None):
                     help="集数范围: all / 1 / 1-5 / 1,3,5 (默认 all)")
     ap.add_argument("-o", "--outdir", default="downloads", help="输出目录 (默认 downloads)")
     ap.add_argument("--list", action="store_true", help="只打印剧信息和集列表, 不下载")
-    ap.add_argument("--device-id", default="", help="固定 device_id (默认随机, 与 jar 一致)")
-    ap.add_argument("--install-id", default="", help="固定 install_id/iid (默认随机)")
+    ap.add_argument("--device-id", default="", help="固定 device_id (默认用内置固定值 41154853790009)")
+    ap.add_argument("--install-id", default="", help="固定 install_id/iid (默认用内置固定值 41154853794105)")
     ap.add_argument("--overwrite", action="store_true", help="已存在文件也重新下载")
     ap.add_argument("--merge", action="store_true",
                     help="全部集数下载完毕后, 按集数顺序用 ffmpeg 将它们合并成一个 "
                          "整体视频 (流拷贝不重编码, 需要 ffmpeg; 单集文件保留)")
     args = ap.parse_args(argv)
 
-    device_id = args.device_id or random_device_id()
-    install_id = args.install_id or random_device_id()
+    device_id = args.device_id or DEFAULT_DEVICE_ID
+    install_id = args.install_id or DEFAULT_INSTALL_ID
     want_q = re.search(r"\d+", str(args.quality))
     want_q = want_q.group(0) if want_q else "1080"
 
