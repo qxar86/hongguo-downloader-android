@@ -18,7 +18,7 @@ source.include_exts = py
 # (str) Application versioning (method 1)
 # 1.2: 新增用户手动选择下载目录 (1.1 的 build1 因网络下载失败, 从未出包,
 # 所以 1.2 才是第一版真正要装的包)
-version = 1.4.6
+version = 1.4.7
 
 # (list) Application requirements
 # ffmpeg + av_codecs 是 v2 的关键: p4a 的 ffmpeg 配方把 ffmpeg 可执行文件
