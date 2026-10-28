@@ -83,6 +83,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -104,17 +105,48 @@ APP_UA = ("com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; "
 MEDIA_UA = "com.phoenix.read/71332"
 QUALITY_ORDER = ["2160", "1440", "1080", "720", "576", "540", "480", "360"]
 
-__VERSION__ = "2026-10-25.8"  # 每次改动加一档, 启动时打印, 供截图核对版本
+__VERSION__ = "2026-10-25.9"  # 每次改动加一档, 启动时打印, 供截图核对版本
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept-Encoding": "identity"})
+
+# --- video_model 空响应风暴的全局冷却 (2026-10-28 漫剧实测) -------------
+# 服务端有时进入"HTTP 200 但 body 0 字节"的空响应期 (同一 vid 连试 30 次
+# 全空), 疑似按 IP/频率限流。旧逻辑内层 3 次重试只隔 0.6/1.2 秒、5 线程
+# 并发等于 5 倍速刷接口, 反而把限流刷得更狠, 表现为"漫剧 220 集下不动、
+# 其他分类能下" (其他分类多半是接口健康时下的, 并非分类本身有差异:
+# 漫剧详情页/video_model/加密/解密全链路与普通剧实测一致)。
+# 做法: 任一线程撞到空响应, 就把全局冷却时间推后 8~15 秒, 所有线程下次
+# 请求 video_model 前先等冷却过去, 再用 2/4/6/8 秒的慢速间隔重试。
+# 风暴要靠等过去, 不是靠多刷。
+_EMPTY_UNTIL = 0.0
+_EMPTY_LOCK = threading.Lock()
+
+
+def _wait_empty_cooldown():
+    """等全局空响应冷却过去 (多线程共用, 避免并发刷接口加重限流)。"""
+    while True:
+        with _EMPTY_LOCK:
+            remain = _EMPTY_UNTIL - time.time()
+        if remain <= 0:
+            return
+        time.sleep(min(remain, 2.0))
+
+
+def _mark_empty_response():
+    """撞到一次空响应: 把冷却时间推后 8~15 秒 (随机抖动防齐步)。"""
+    with _EMPTY_LOCK:
+        global _EMPTY_UNTIL
+        _EMPTY_UNTIL = max(_EMPTY_UNTIL, time.time() + random.uniform(8, 15))
 
 
 def log(*a):
     print(*a, flush=True)
 
 
-def retry(fn, times=3, desc=""):
+def retry(fn, times=3, desc="", base_delay=0.6):
+    """通用重试: 失败后按 base_delay*(1..n-1) 秒 + 0~0.5 秒抖动等待。
+    video_model 这类易限流的接口用更大的 base_delay (慢速重试)。"""
     last = None
     for i in range(times):
         try:
@@ -122,7 +154,7 @@ def retry(fn, times=3, desc=""):
         except Exception as e:  # noqa: BLE001
             last = e
             if i + 1 < times:
-                time.sleep(0.6 * (i + 1))
+                time.sleep(base_delay * (i + 1) + random.uniform(0, 0.5))
     raise RuntimeError(f"{desc} 失败(重试{times}次): {last}")
 
 
@@ -659,14 +691,19 @@ def video_model(vid, device_id, install_id):
     }
 
     def _post():
+        # 先等全局空响应冷却: 上一轮撞到空响应后所有线程都先歇一会,
+        # 别在限流期里继续刷接口 (见 _EMPTY_UNTIL 注释)。
+        _wait_empty_cooldown()
         r = SESSION.post(VIDEO_URL, params=params, data=body.encode("utf-8"),
                          headers=headers, timeout=30)
         r.raise_for_status()
         # 服务端有时返回 HTTP 200 但 body 为空 (实测 2026-10-28 同一 vid
-        # 连试 8 次, 3 次成功 5 次空响应, 疑似服务端限流/抖动), 直接
-        # r.json() 只会报没头没尾的 "Expecting value: line 1 column 1"。
-        # 这里先验 body, 空响应按可重试失败处理, 交给 retry()/上层重试。
+        # 连试 8 次, 3 次成功 5 次空响应; 高峰期连试 30 次全空, 疑似
+        # 服务端限流/抖动), 直接 r.json() 只会报没头没尾的 "Expecting
+        # value: line 1 column 1"。这里先验 body, 空响应按可重试失败
+        # 处理, 同时触发全局冷却, 交给 retry()/上层重试。
         if not r.content:
+            _mark_empty_response()
             raise RuntimeError(
                 f"video_model 返回空响应 (HTTP {r.status_code}, 0 字节, "
                 f"疑似服务端限流/抖动)")
@@ -677,7 +714,9 @@ def video_model(vid, device_id, install_id):
                 f"video_model 返回非 JSON (HTTP {r.status_code}, "
                 f"{len(r.content)} 字节, 开头: {r.content[:80]!r}): {e}")
 
-    resp = retry(_post, desc="video_model")
+    # 慢速重试: 内层 5 次、间隔 2/4/6/8 秒 (旧版 3 次只隔 0.6/1.2 秒,
+    # 空响应期里等于连刷, 更容易被限流)。
+    resp = retry(_post, times=5, desc="video_model", base_delay=2.0)
     data = resp.get("data")
     if not data:
         raise RuntimeError(f"video_model data empty: {str(resp)[:300]}")
@@ -956,8 +995,9 @@ def download_episode_to_file(vid, want_quality, device_id, install_id, out_path,
     加密中间文件落在目标同目录的 .enc.mp4, 成功后删除; 失败保留以便排查。
     失败自动重试: retries=10 表示首次失败后最多再试 10 次 (共 11 次尝试),
     每次重试都重新取 model/取真实 URL/派生密钥 (URL 可能过期, 换一次
-    可能就通了), 重试间隔 2/4/6... 秒递增、上限 20 秒。注意内层
-    _stream_download/video_model 本身已有 3 次小重试, 外层是整集级重试。"""
+    可能就通了)。普通失败重试间隔 2/4/6... 秒递增、上限 20 秒; 空响应
+    (服务端限流期) 则 5/10/15... 秒递增、上限 60 秒, 风暴要靠等过去。
+    注意内层 video_model 本身已有 5 次慢速小重试, 外层是整集级重试。"""
     retries = _parse_retries(retries)
     last_err = None
     for attempt in range(retries + 1):
@@ -974,7 +1014,12 @@ def download_episode_to_file(vid, want_quality, device_id, install_id, out_path,
             except OSError:
                 pass
             if attempt < retries:
-                wait = min(2 * (attempt + 1), 20)
+                # 空响应 = 服务端限流期: 等久一点 (5/10/15... 上限 60 秒),
+                # 别拿 2 秒间隔去刷它; 其他失败保持 2/4/6... 上限 20 秒。
+                if "空响应" in str(e):
+                    wait = min(5 * (attempt + 1), 60)
+                else:
+                    wait = min(2 * (attempt + 1), 20)
                 log(f"vid={vid} 下载失败 (第{attempt + 1}/{retries + 1}次尝试): "
                     f"{e}, {wait} 秒后自动重试 ({attempt + 1}/{retries})...")
                 time.sleep(wait)
@@ -1349,6 +1394,7 @@ def _probe_quality(vids, eps, device_id, install_id, default_q="1080"):
             return _choose_quality(model, f"以第{n}集为例")
         except Exception as e:  # noqa: BLE001
             log(f"取第{n}集分辨率失败: {e}, 换一集再试...")
+            time.sleep(3)  # 探分辨率也别连刷, 给服务端喘口气
     log(f"连续 {len(tried)} 集都取不到分辨率列表, 默认用 {default_q}p 继续下载 "
         f"(下载每集时还会自动重试, 失败的集最后会汇总)")
     return default_q
